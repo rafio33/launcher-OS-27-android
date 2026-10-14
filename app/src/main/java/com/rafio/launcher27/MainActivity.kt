@@ -1,4 +1,4 @@
-package com.example.ios27launcher
+package com.rafio.launcher27
 
 import android.content.BroadcastReceiver
 import android.content.Context

@@ -4,15 +4,15 @@ plugins {
 }
 
 android {
-    namespace = "com.example.ios27launcher"
-    compileSdk = 34
+    namespace = "com.rafio.launcher27"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.ios27launcher"
-        minSdk = 31
-        targetSdk = 34
-        versionCode = 1
-        versionName = "27.0-Spatial"
+        applicationId = "com.rafio.launcher27"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 2
+        versionName = "27.1-Spatial"
     }
 
     buildTypes {
