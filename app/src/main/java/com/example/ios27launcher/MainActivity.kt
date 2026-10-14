@@ -37,7 +37,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -75,22 +74,6 @@ data class WeatherData(
     val low: Int = 25
 )
 
-@Immutable
-data class SongTrack(
-    val title: String,
-    val artist: String,
-    val durationSeconds: Int = 210,
-    val themeColor: Color = Color(0xFFFA2D48)
-)
-
-val samplePlaylist = listOf(
-    SongTrack("Starboy", "The Weeknd ft. Daft Punk", 230, Color(0xFFFA2D48)),
-    SongTrack("Blinding Lights", "The Weeknd", 200, Color(0xFFFF9500)),
-    SongTrack("Espresso", "Sabrina Carpenter", 175, Color(0xFF007AFF)),
-    SongTrack("Golden Hour", "JVKE", 210, Color(0xFFFFCC00)),
-    SongTrack("Cruel Summer", "Taylor Swift", 178, Color(0xFFFF2D55))
-)
-
 enum class IslandMode {
     IDLE,
     CHARGING,
@@ -102,7 +85,6 @@ enum class IslandMode {
     ALARM_EXPANDED
 }
 
-// Konversi drawable ke ImageBitmap dioptimalkan ke 112px untuk efisiensi memori & render GPU
 fun drawableToBitmap(drawable: Drawable): ImageBitmap {
     val bmp = Bitmap.createBitmap(112, 112, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
@@ -180,6 +162,46 @@ fun IOS27LauncherScreen() {
         onDispose { context.unregisterReceiver(receiver) }
     }
 
+    // Spotify Broadcast Receiver (Mendengarkan event lagu langsung dari Spotify)
+    DisposableEffect(context) {
+        val spotifyReceiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                if (intent == null) return
+                when (intent.action) {
+                    "com.spotify.music.metadatachanged" -> {
+                        val track = intent.getStringExtra("track") ?: return
+                        val artist = intent.getStringExtra("artist") ?: "Spotify"
+                        val length = intent.getIntExtra("length", 0)
+                        MediaStateHolder.trackTitle = track
+                        MediaStateHolder.trackArtist = artist
+                        if (length > 0) MediaStateHolder.trackDurationMs = length.toLong()
+                        MediaStateHolder.hasActiveMedia = true
+                    }
+                    "com.spotify.music.playbackstatechanged" -> {
+                        val playing = intent.getBooleanExtra("playing", false)
+                        val position = intent.getIntExtra("playbackPosition", 0)
+                        MediaStateHolder.isPlaying = playing
+                        MediaStateHolder.trackPositionMs = position.toLong()
+                        MediaStateHolder.hasActiveMedia = true
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction("com.spotify.music.metadatachanged")
+            addAction("com.spotify.music.playbackstatechanged")
+            addAction("com.spotify.music.queuechanged")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(spotifyReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            context.registerReceiver(spotifyReceiver, filter)
+        }
+        onDispose {
+            try { context.unregisterReceiver(spotifyReceiver) } catch (_: Exception) {}
+        }
+    }
+
     // Ambil Data Cuaca Live
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -228,10 +250,6 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Pembagian Halaman:
-    // Page 0 = Halaman Search & App Library (Paling Kiri Mentok)
-    // Page 1 = Widget Atas + 12 Aplikasi (3 baris x 4 kolom)
-    // Page 2..N = Masing-masing 20 Aplikasi (5 baris x 4 kolom)
     val firstPageApps by remember(apps) {
         derivedStateOf { apps.take(12) }
     }
@@ -244,7 +262,7 @@ fun IOS27LauncherScreen() {
 
     val pagerState = rememberPagerState(initialPage = 1, pageCount = { totalPages })
 
-    // Tutup keyboard otomatis jika keluar dari halaman Search (Page 0)
+    // Tutup keyboard otomatis jika keluar dari halaman Search
     LaunchedEffect(pagerState.currentPage) {
         if (pagerState.currentPage != 0) {
             focusManager.clearFocus()
@@ -270,8 +288,8 @@ fun IOS27LauncherScreen() {
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Spacer pembatas atas agar Dynamic Bar yang melayang tidak menabrak widget
-            Spacer(modifier = Modifier.statusBarsPadding().height(48.dp))
+            // Spacer pas di bawah lubang kamera & compact dynamic island
+            Spacer(modifier = Modifier.height(48.dp))
 
             HorizontalPager(
                 state = pagerState,
@@ -452,12 +470,12 @@ fun IOS27LauncherScreen() {
             )
         }
 
-        // LAYER 2: PERSISTENT FLOATING DYNAMIC ISLAND (SELALU ADA DI ATAS PADA SEMUA HALAMAN MENU)
+        // LAYER 2: DYNAMIC ISLAND TEPAT DI LUBANG KAMERA PUNCH-HOLE ATAS
+        // top = 6.dp menempel pas di sekitar lubang kamera depan tanpa terdorong ke bawah
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(top = 4.dp)
+                .padding(top = 6.dp)
                 .zIndex(10f),
             contentAlignment = Alignment.TopCenter
         ) {
@@ -479,7 +497,7 @@ fun IOS27LauncherScreen() {
 }
 
 // ==========================================
-// DYNAMIC ISLAND BAR (ISOLATED ZERO-LAG SCOPE)
+// DYNAMIC ISLAND BAR (REAL SPOTIFY & ZERO LAG)
 // ==========================================
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -490,17 +508,36 @@ fun DynamicIslandBar(
     val context = LocalContext.current
     var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
 
-    // State Musik Terisolasi (Tidak memicu recomposition di luar Dynamic Island)
-    var isPlaying by remember { mutableStateOf(false) }
-    var currentTrackIndex by remember { mutableIntStateOf(0) }
-    var trackProgressSeconds by remember { mutableIntStateOf(45) }
-    val currentTrack = samplePlaylist[currentTrackIndex % samplePlaylist.size]
+    // Membaca state real Spotify langsung dari MediaStateHolder
+    val isPlaying = MediaStateHolder.isPlaying
+    val trackTitle = MediaStateHolder.trackTitle
+    val trackArtist = MediaStateHolder.trackArtist
+    val albumArt = MediaStateHolder.albumArtBitmap
+    val durationMs = MediaStateHolder.trackDurationMs
+    var localPositionMs by remember { mutableLongStateOf(0L) }
+    val isAccessGranted = remember { MediaStateHolder.isNotificationAccessGranted(context) }
 
     // State Perekam Suara Terisolasi
     var recordSeconds by remember { mutableIntStateOf(0) }
 
     // State Alarm Terisolasi
     var alarmSeconds by remember { mutableIntStateOf(45) }
+
+    // Otomatis aktifkan Compact Music saat Spotify sedang berputar
+    LaunchedEffect(isPlaying) {
+        if (isPlaying && islandMode == IslandMode.IDLE) {
+            islandMode = IslandMode.MUSIC_COMPACT
+        }
+    }
+
+    // Sinkronisasi posisi progress lagu saat playing
+    LaunchedEffect(isPlaying, MediaStateHolder.trackPositionMs) {
+        localPositionMs = MediaStateHolder.trackPositionMs
+        while (isPlaying) {
+            delay(1000)
+            localPositionMs += 1000L
+        }
+    }
 
     // Otomatis Aktifkan Animasi Charger Saat Dicolok
     LaunchedEffect(isCharging) {
@@ -511,18 +548,6 @@ fun DynamicIslandBar(
             delay(3500)
             if (islandMode == IslandMode.CHARGING) {
                 islandMode = if (isPlaying) IslandMode.MUSIC_COMPACT else prev.takeIf { it != IslandMode.CHARGING } ?: IslandMode.IDLE
-            }
-        }
-    }
-
-    // Timer Putar Musik (Hanya berdetik jika sedang playing)
-    LaunchedEffect(isPlaying, currentTrackIndex) {
-        while (isPlaying) {
-            delay(1000)
-            trackProgressSeconds++
-            if (trackProgressSeconds >= currentTrack.durationSeconds) {
-                currentTrackIndex = (currentTrackIndex + 1) % samplePlaylist.size
-                trackProgressSeconds = 0
             }
         }
     }
@@ -553,14 +578,14 @@ fun DynamicIslandBar(
         }
     }
 
-    // Animasi Pegas Dynamic Island yang Halus (Smooth Spring Curve)
+    // Animasi Pegas Dynamic Island (Smooth Spring Curve)
     val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
 
     val targetWidth = when (islandMode) {
-        IslandMode.IDLE -> 112f
+        IslandMode.IDLE -> 110f
         IslandMode.CHARGING -> 268f
-        IslandMode.MUSIC_COMPACT -> 200f
-        IslandMode.MUSIC_EXPANDED -> 342f
+        IslandMode.MUSIC_COMPACT -> 205f
+        IslandMode.MUSIC_EXPANDED -> 344f
         IslandMode.RECORDING_COMPACT -> 180f
         IslandMode.RECORDING_EXPANDED -> 330f
         IslandMode.ALARM_COMPACT -> 175f
@@ -572,7 +597,7 @@ fun DynamicIslandBar(
         IslandMode.IDLE -> 33f
         IslandMode.CHARGING -> 46f
         IslandMode.MUSIC_COMPACT -> 36f
-        IslandMode.MUSIC_EXPANDED -> 182f
+        IslandMode.MUSIC_EXPANDED -> 190f
         IslandMode.RECORDING_COMPACT -> 38f
         IslandMode.RECORDING_EXPANDED -> 88f
         IslandMode.ALARM_COMPACT -> 38f
@@ -580,7 +605,7 @@ fun DynamicIslandBar(
     }
     val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
 
-    // Kontainer Dynamic Island Melayang
+    // Kontainer Dynamic Island Melayang Pas di Sekitar Lubang Kamera
     Box(
         modifier = Modifier
             .width(animatedWidth.dp)
@@ -596,14 +621,8 @@ fun DynamicIslandBar(
                 onClick = {
                     triggerHaptic(context)
                     islandMode = when (islandMode) {
-                        IslandMode.IDLE -> {
-                            // Saat di-tap di mode Idle, langsung aktifkan Dynamic Music Player
-                            isPlaying = true
-                            IslandMode.MUSIC_EXPANDED
-                        }
-                        IslandMode.CHARGING -> {
-                            if (isPlaying) IslandMode.MUSIC_COMPACT else IslandMode.IDLE
-                        }
+                        IslandMode.IDLE -> IslandMode.MUSIC_EXPANDED
+                        IslandMode.CHARGING -> if (isPlaying) IslandMode.MUSIC_COMPACT else IslandMode.IDLE
                         IslandMode.MUSIC_COMPACT -> IslandMode.MUSIC_EXPANDED
                         IslandMode.MUSIC_EXPANDED -> IslandMode.MUSIC_COMPACT
                         IslandMode.RECORDING_COMPACT -> IslandMode.RECORDING_EXPANDED
@@ -614,27 +633,18 @@ fun DynamicIslandBar(
                 },
                 onLongClick = {
                     triggerHaptic(context)
-                    // Tekan lama untuk ganti mode (Music -> Recorder -> Alarm -> Idle)
                     islandMode = when (islandMode) {
-                        IslandMode.IDLE -> {
-                            isPlaying = true
-                            IslandMode.MUSIC_COMPACT
-                        }
-                        IslandMode.MUSIC_COMPACT, IslandMode.MUSIC_EXPANDED -> {
-                            IslandMode.RECORDING_COMPACT
-                        }
+                        IslandMode.IDLE -> IslandMode.MUSIC_COMPACT
+                        IslandMode.MUSIC_COMPACT, IslandMode.MUSIC_EXPANDED -> IslandMode.RECORDING_COMPACT
                         IslandMode.RECORDING_COMPACT, IslandMode.RECORDING_EXPANDED -> {
                             alarmSeconds = 45
                             IslandMode.ALARM_COMPACT
-                        }
-                        IslandMode.ALARM_COMPACT, IslandMode.ALARM_EXPANDED -> {
-                            IslandMode.IDLE
                         }
                         else -> IslandMode.IDLE
                     }
                 }
             )
-            .padding(horizontal = if (islandMode == IslandMode.MUSIC_EXPANDED) 16.dp else 14.dp),
+            .padding(horizontal = if (islandMode == IslandMode.MUSIC_EXPANDED) 16.dp else 12.dp),
         contentAlignment = Alignment.Center
     ) {
         AnimatedContent(
@@ -652,7 +662,9 @@ fun DynamicIslandBar(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Titik kamera punch-hole kiri
                         Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101014)))
+                        // Indikator status kanan
                         Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (isCharging) Color(0xFF30D158) else Color(0xFF18181E)))
                     }
                 }
@@ -678,33 +690,43 @@ fun DynamicIslandBar(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Kiri: Mini Spinning Vinyl / Artwork
+                        // Kiri: Cover Spotify / Album Art Real
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clip(CircleShape)
-                                    .background(currentTrack.themeColor),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("🎵", fontSize = 10.sp)
+                            if (albumArt != null) {
+                                Image(
+                                    bitmap = albumArt,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF1DB954)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("🎵", fontSize = 10.sp)
+                                }
                             }
                             Spacer(modifier = Modifier.width(7.dp))
                             Text(
-                                text = currentTrack.title,
+                                text = trackTitle,
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.widthIn(max = 95.dp)
+                                modifier = Modifier.widthIn(max = 100.dp)
                             )
                         }
 
-                        // Kanan: Mini Equalizer Berdenyut 60 FPS di Canvas
+                        // Kanan: Mini Equalizer Hijau Spotify di Canvas 60 FPS
                         MiniEqualizer(
                             isPlaying = isPlaying,
-                            barColor = currentTrack.themeColor,
+                            barColor = Color(0xFF1DB954),
                             modifier = Modifier.size(width = 22.dp, height = 15.dp)
                         )
                     }
@@ -714,35 +736,48 @@ fun DynamicIslandBar(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 12.dp),
+                            .padding(vertical = 10.dp),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Header Baris 1: Cover Album + Info Lagu + Waveform
+                        // Header Baris 1: Cover Album Asli + Info Judul & Artis Spotify + Waveform
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Cover Album Rounded
-                            Box(
-                                modifier = Modifier
-                                    .size(52.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(
-                                        Brush.linearGradient(
-                                            listOf(currentTrack.themeColor, Color(0xFF1C1C1E))
+                            // Cover Album Real Spotify
+                            if (albumArt != null) {
+                                Image(
+                                    bitmap = albumArt,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(52.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
+                                        .clickable { MediaStateHolder.openSpotify(context) }
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(52.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(Color(0xFF1DB954), Color(0xFF191414))
+                                            )
                                         )
-                                    )
-                                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("🎶", fontSize = 24.sp)
+                                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
+                                        .clickable { MediaStateHolder.openSpotify(context) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("🎧", fontSize = 24.sp)
+                                }
                             }
 
                             Spacer(modifier = Modifier.width(12.dp))
 
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = currentTrack.title,
+                                    text = trackTitle,
                                     color = Color.White,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Bold,
@@ -750,7 +785,7 @@ fun DynamicIslandBar(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = currentTrack.artist,
+                                    text = trackArtist,
                                     color = Color.White.copy(alpha = 0.72f),
                                     fontSize = 12.sp,
                                     maxLines = 1,
@@ -758,18 +793,39 @@ fun DynamicIslandBar(
                                 )
                             }
 
-                            // Dynamic Live Waveform di Kanan
+                            // Dynamic Waveform Spotify Hijau
                             ExpandedWaveformVisualizer(
                                 isPlaying = isPlaying,
-                                barColor = currentTrack.themeColor,
+                                barColor = Color(0xFF1DB954),
                                 modifier = Modifier.size(width = 44.dp, height = 24.dp)
                             )
                         }
 
-                        Spacer(modifier = Modifier.height(10.dp))
+                        // Banner Bantuan jika Akses Notifikasi belum diizinkan
+                        if (!isAccessGranted) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF1DB954).copy(alpha = 0.2f))
+                                    .clickable { MediaStateHolder.openNotificationAccessSettings(context) }
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("⚠️ Izinkan Akses Notifikasi Media", fontSize = 10.sp, color = Color.White)
+                                Text("Izinkan ➔", fontSize = 10.sp, color = Color(0xFF1DB954), fontWeight = FontWeight.Bold)
+                            }
+                        }
 
-                        // Timeline & Progress Bar
-                        val progressRatio = (trackProgressSeconds.toFloat() / currentTrack.durationSeconds.toFloat()).coerceIn(0f, 1f)
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Timeline Durasi Real Lagu Spotify
+                        val currentSec = (localPositionMs / 1000L).coerceAtLeast(0L)
+                        val totalSec = (durationMs / 1000L).coerceAtLeast(0L)
+                        val progressRatio = if (totalSec > 0) (currentSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) else 0f
+
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Box(
                                 modifier = Modifier
@@ -783,37 +839,35 @@ fun DynamicIslandBar(
                                         .fillMaxWidth(progressRatio)
                                         .fillMaxHeight()
                                         .clip(RoundedCornerShape(2.dp))
-                                        .background(Color.White)
+                                        .background(Color(0xFF1DB954))
                                 )
                             }
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.height(3.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = String.format("%02d:%02d", trackProgressSeconds / 60, trackProgressSeconds % 60),
+                                    text = String.format("%02d:%02d", currentSec / 60, currentSec % 60),
                                     color = Color.White.copy(alpha = 0.6f),
                                     fontSize = 10.sp
                                 )
-                                val remaining = (currentTrack.durationSeconds - trackProgressSeconds).coerceAtLeast(0)
                                 Text(
-                                    text = String.format("-%02d:%02d", remaining / 60, remaining % 60),
+                                    text = if (totalSec > 0) String.format("%02d:%02d", totalSec / 60, totalSec % 60) else "--:--",
                                     color = Color.White.copy(alpha = 0.6f),
                                     fontSize = 10.sp
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
 
-                        // Baris 3: Kontrol Pemutar Musik (Prev, Play/Pause, Next)
+                        // Kontrol Musik Real Spotify (Prev, Play/Pause, Next)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Tombol Kecilkan
                             IconButton(
                                 onClick = { islandMode = IslandMode.MUSIC_COMPACT },
                                 modifier = Modifier.size(32.dp)
@@ -821,66 +875,57 @@ fun DynamicIslandBar(
                                 Text("▾", color = Color.White.copy(alpha = 0.7f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
                             }
 
-                            // Previous Track
+                            // Previous Song di Spotify
                             IconButton(
                                 onClick = {
                                     triggerHaptic(context)
-                                    if (trackProgressSeconds > 3) {
-                                        trackProgressSeconds = 0
-                                    } else {
-                                        currentTrackIndex = if (currentTrackIndex > 0) currentTrackIndex - 1 else samplePlaylist.size - 1
-                                        trackProgressSeconds = 0
-                                    }
-                                    isPlaying = true
+                                    MediaStateHolder.skipPrevious(context)
                                 },
                                 modifier = Modifier.size(36.dp)
                             ) {
                                 Text("⏮", color = Color.White, fontSize = 18.sp)
                             }
 
-                            // Play / Pause Circle
+                            // Play / Pause Real Spotify
                             Box(
                                 modifier = Modifier
-                                    .size(44.dp)
+                                    .size(42.dp)
                                     .clip(CircleShape)
                                     .background(Color.White)
                                     .clickable {
                                         triggerHaptic(context)
-                                        isPlaying = !isPlaying
+                                        MediaStateHolder.playPause(context)
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = if (isPlaying) "⏸" else "▶",
                                     color = Color.Black,
-                                    fontSize = 18.sp,
+                                    fontSize = 17.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
 
-                            // Next Track
+                            // Next Song di Spotify
                             IconButton(
                                 onClick = {
                                     triggerHaptic(context)
-                                    currentTrackIndex = (currentTrackIndex + 1) % samplePlaylist.size
-                                    trackProgressSeconds = 0
-                                    isPlaying = true
+                                    MediaStateHolder.skipNext(context)
                                 },
                                 modifier = Modifier.size(36.dp)
                             ) {
                                 Text("⏭", color = Color.White, fontSize = 18.sp)
                             }
 
-                            // Stop / Tutup
+                            // Tombol Buka Spotify
                             IconButton(
                                 onClick = {
                                     triggerHaptic(context)
-                                    isPlaying = false
-                                    islandMode = IslandMode.IDLE
+                                    MediaStateHolder.openSpotify(context)
                                 },
                                 modifier = Modifier.size(32.dp)
                             ) {
-                                Text("✕", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+                                Text("🟢", fontSize = 13.sp)
                             }
                         }
                     }
@@ -1000,7 +1045,6 @@ fun MiniEqualizer(
     modifier: Modifier = Modifier
 ) {
     if (!isPlaying) {
-        // Gambar batang diam statis tanpa menghabiskan siklus CPU/GPU
         Canvas(modifier = modifier) {
             val barW = 2.5.dp.toPx()
             val spacing = 2.dp.toPx()
@@ -1020,7 +1064,6 @@ fun MiniEqualizer(
         return
     }
 
-    // Animasi batang aktif hanya berjalan saat status playing
     val transition = rememberInfiniteTransition(label = "miniEq")
     val b1 by transition.animateFloat(
         initialValue = 0.25f, targetValue = 0.95f,
