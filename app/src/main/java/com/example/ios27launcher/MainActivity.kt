@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -37,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,25 +49,27 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
+@Immutable
 data class AppModel(
     val label: String,
     val packageName: String,
     val icon: ImageBitmap
 )
 
+@Immutable
 data class WeatherData(
     val temp: Int = 30,
-    val condition: String = "Memuat...",
+    val condition: String = "Cerah Berawan",
     val high: Int = 33,
     val low: Int = 25
 )
 
-// Enum status fungsi resmi Dynamic Island
 enum class IslandMode {
     IDLE,
     CHARGING,
@@ -74,8 +79,9 @@ enum class IslandMode {
     ALARM_EXPANDED
 }
 
+// Ukuran bitmap dioptimalkan ke 112px agar render GPU sangat ringan & smooth saat swipe
 fun drawableToBitmap(drawable: Drawable): ImageBitmap {
-    val bmp = Bitmap.createBitmap(140, 140, Bitmap.Config.ARGB_8888)
+    val bmp = Bitmap.createBitmap(112, 112, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bmp)
     drawable.setBounds(0, 0, canvas.width, canvas.height)
     drawable.draw(canvas)
@@ -119,24 +125,25 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun IOS27LauncherScreen() {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val coroutineScope = rememberCoroutineScope()
+
     var apps by remember { mutableStateOf<List<AppModel>>(emptyList()) }
-    var searchQuery by remember { mutableStateOf("") }
-    var showSpotlight by remember { mutableStateOf(false) }
     var selectedAppMenu by remember { mutableStateOf<AppModel?>(null) }
 
     // State Baterai Real-Time
-    var batteryPct by remember { mutableStateOf(100) }
+    var batteryPct by remember { mutableIntStateOf(100) }
     var isCharging by remember { mutableStateOf(false) }
 
-    // State Fungsional Dynamic Island
+    // State Dynamic Island
     var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
-    var recordSeconds by remember { mutableStateOf(0) }
-    var alarmSeconds by remember { mutableStateOf(45) }
+    var recordSeconds by remember { mutableIntStateOf(0) }
+    var alarmSeconds by remember { mutableIntStateOf(45) }
 
     // State Cuaca Real-Time
     var weather by remember { mutableStateOf(WeatherData()) }
 
-    // Broadcast Baterai
+    // Sensor Baterai
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -150,7 +157,6 @@ fun IOS27LauncherScreen() {
                 val nowCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                         status == BatteryManager.BATTERY_STATUS_FULL
 
-                // Otomatis memicu animasi cas saat kabel dicolok
                 if (nowCharging && !isCharging) {
                     triggerHaptic(context)
                     islandMode = IslandMode.CHARGING
@@ -162,7 +168,6 @@ fun IOS27LauncherScreen() {
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // Auto-shrink saat cas selesai ditampilkan (3 detik)
     LaunchedEffect(islandMode) {
         if (islandMode == IslandMode.CHARGING) {
             delay(3000)
@@ -170,7 +175,6 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Timer Rekam Suara
     LaunchedEffect(islandMode) {
         if (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
             while (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
@@ -182,7 +186,6 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Timer Alarm Mundur
     LaunchedEffect(islandMode) {
         if (islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) {
             while ((islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) && alarmSeconds > 0) {
@@ -193,7 +196,7 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Ambil Cuaca Real
+    // Ambil Data Cuaca Live
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
@@ -223,13 +226,11 @@ fun IOS27LauncherScreen() {
                     }
                     weather = WeatherData(temp = temp, condition = desc, high = high, low = low)
                 }
-            } catch (_: Exception) {
-                weather = WeatherData(temp = 30, condition = "Cerah Berawan", high = 33, low = 25)
-            }
+            } catch (_: Exception) { }
         }
     }
 
-    // Ambil Aplikasi Terinstal
+    // Muat Aplikasi Sekali di Background Thread
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val pm = context.packageManager
@@ -243,17 +244,32 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    val filteredApps = remember(apps, searchQuery) {
-        if (searchQuery.isBlank()) apps
-        else apps.filter { it.label.contains(searchQuery, ignoreCase = true) }
+    // Pembagian Halaman:
+    // Page 0 = Halaman Search & App Library (Paling Kiri Mentok)
+    // Page 1 = Widget Atas + 12 Aplikasi (3 baris x 4 kolom)
+    // Page 2..N = Masing-masing 20 Aplikasi (5 baris x 4 kolom)
+    val firstPageApps by remember(apps) {
+        derivedStateOf { apps.take(12) }
+    }
+    val extraPages by remember(apps) {
+        derivedStateOf {
+            if (apps.size > 12) apps.drop(12).chunked(20) else emptyList()
+        }
+    }
+    val totalPages = 2 + extraPages.size
+
+    // Mulai di Page 1 (Halaman Utama Pertama), sehingga kalau swipe mentok ke kiri masuk ke Page 0 (Search)
+    val pagerState = rememberPagerState(initialPage = 1, pageCount = { totalPages })
+
+    // Tutup keyboard otomatis jika keluar dari halaman Search (Page 0)
+    LaunchedEffect(pagerState.currentPage) {
+        if (pagerState.currentPage != 0) {
+            focusManager.clearFocus()
+        }
     }
 
-    // --- ANIMASI SPRING PHYSICS KHAS APPLE iOS (ELASTIS & KENYAL) ---
-    val springSpec = spring<Float>(
-        dampingRatio = 0.62f, // Efek sedikit membal lembut
-        stiffness = Spring.StiffnessMediumLow
-    )
-
+    // Animasi Pegas Dynamic Island
+    val springSpec = spring<Float>(dampingRatio = 0.62f, stiffness = Spring.StiffnessMediumLow)
     val targetWidth = when (islandMode) {
         IslandMode.IDLE -> 110f
         IslandMode.CHARGING -> 265f
@@ -274,7 +290,6 @@ fun IOS27LauncherScreen() {
     }
     val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
 
-    // Equalizer Suara
     val infiniteTransition = rememberInfiniteTransition(label = "eq")
     val wave1 by infiniteTransition.animateFloat(8f, 22f, infiniteRepeatable(tween(280), RepeatMode.Reverse), label = "")
     val wave2 by infiniteTransition.animateFloat(22f, 9f, infiniteRepeatable(tween(400), RepeatMode.Reverse), label = "")
@@ -286,23 +301,21 @@ fun IOS27LauncherScreen() {
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF0A1128).copy(alpha = 0.40f),
-                        Color(0xFF1C2541).copy(alpha = 0.65f),
-                        Color(0xFF0B132B).copy(alpha = 0.80f)
+                        Color(0xFF0A1128).copy(alpha = 0.38f),
+                        Color(0xFF1C2541).copy(alpha = 0.62f),
+                        Color(0xFF0B132B).copy(alpha = 0.78f)
                     )
                 )
             )
             .navigationBarsPadding()
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp),
+            modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(modifier = Modifier.height(6.dp))
 
-            // --- 1. DYNAMIC ISLAND (AUTENTIK APPLE HIG) ---
+            // 1. DYNAMIC ISLAND DI KAMERA ATAS
             Box(
                 modifier = Modifier
                     .width(animatedWidth.dp)
@@ -313,19 +326,17 @@ fun IOS27LauncherScreen() {
                     .combinedClickable(
                         onClick = {
                             triggerHaptic(context)
-                            // Interaktivitas klik fungsi resmi:
                             islandMode = when (islandMode) {
                                 IslandMode.RECORDING_COMPACT -> IslandMode.RECORDING_EXPANDED
                                 IslandMode.RECORDING_EXPANDED -> IslandMode.RECORDING_COMPACT
                                 IslandMode.ALARM_COMPACT -> IslandMode.ALARM_EXPANDED
                                 IslandMode.ALARM_EXPANDED -> IslandMode.ALARM_COMPACT
-                                IslandMode.IDLE -> IslandMode.RECORDING_COMPACT // Klik saat idle mengaktifkan demo rekam
+                                IslandMode.IDLE -> IslandMode.RECORDING_COMPACT
                                 else -> IslandMode.IDLE
                             }
                         },
                         onLongClick = {
                             triggerHaptic(context)
-                            // Tekan lama beralih ke simulasi fungsi Alarm
                             islandMode = if (islandMode == IslandMode.ALARM_COMPACT) IslandMode.IDLE else IslandMode.ALARM_COMPACT
                         }
                     )
@@ -335,10 +346,10 @@ fun IOS27LauncherScreen() {
                 AnimatedContent(
                     targetState = islandMode,
                     transitionSpec = {
-                        (fadeIn(animationSpec = tween(180, delayMillis = 60)) + scaleIn(initialScale = 0.92f))
-                            .togetherWith(fadeOut(animationSpec = tween(120)) + scaleOut(targetScale = 0.92f))
+                        (fadeIn(tween(160, delayMillis = 50)) + scaleIn(initialScale = 0.92f))
+                            .togetherWith(fadeOut(tween(110)) + scaleOut(targetScale = 0.92f))
                     },
-                    label = "content"
+                    label = "island"
                 ) { mode ->
                     when (mode) {
                         IslandMode.IDLE -> {
@@ -351,7 +362,6 @@ fun IOS27LauncherScreen() {
                                 Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (isCharging) Color(0xFF30D158) else Color(0xFF18181A)))
                             }
                         }
-
                         IslandMode.CHARGING -> {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -366,8 +376,6 @@ fun IOS27LauncherScreen() {
                                 Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-
-                        // REKAM SUARA (MODE RAMPING)
                         IslandMode.RECORDING_COMPACT -> {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -388,13 +396,8 @@ fun IOS27LauncherScreen() {
                                 }
                             }
                         }
-
-                        // REKAM SUARA (MODE MEKAR / DIKLIK)
                         IslandMode.RECORDING_EXPANDED -> {
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.Center
-                            ) {
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -433,8 +436,6 @@ fun IOS27LauncherScreen() {
                                 }
                             }
                         }
-
-                        // ALARM (MODE RAMPING)
                         IslandMode.ALARM_COMPACT -> {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -442,21 +443,11 @@ fun IOS27LauncherScreen() {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text("🔔", fontSize = 12.sp)
-                                Text(
-                                    String.format("%02ds", alarmSeconds),
-                                    color = Color(0xFFFF9F0A),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Text(String.format("%02ds", alarmSeconds), color = Color(0xFFFF9F0A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-
-                        // ALARM (MODE MEKAR / DIKLIK)
                         IslandMode.ALARM_EXPANDED -> {
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.Center
-                            ) {
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -467,18 +458,10 @@ fun IOS27LauncherScreen() {
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text("Alarm Berjalan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     }
-                                    Text(
-                                        String.format("%02ds lagi", alarmSeconds),
-                                        color = Color(0xFFFF9F0A),
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Text(String.format("%02ds lagi", alarmSeconds), color = Color(0xFFFF9F0A), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
                                 Spacer(modifier = Modifier.height(8.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                                     Button(
                                         onClick = { islandMode = IslandMode.IDLE },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
@@ -493,194 +476,212 @@ fun IOS27LauncherScreen() {
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // --- 2. WIDGET BARIS ATAS (BATERAI MURNI NON-KLIK) ---
-            Row(
+            // 2. HORIZONTAL PAGER (SWIPE KANAN-KIRI & SWIPE KIRI MENTOK UNTUK SEARCH)
+            HorizontalPager(
+                state = pagerState,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(145.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                // Widget Cuaca
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(26.dp))
-                        .background(
-                            Brush.linearGradient(
-                                listOf(Color(0xFF1D6FA3).copy(alpha = 0.82f), Color(0xFF0F3460).copy(alpha = 0.82f))
-                            )
-                        )
-                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(26.dp))
-                        .padding(16.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column {
-                            Text("Jakarta", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                            Text("${weather.temp}°", color = Color.White, fontWeight = FontWeight.Light, fontSize = 40.sp)
-                        }
-                        Text(
-                            "${weather.condition}\nT:${weather.high}°  R:${weather.low}°",
-                            color = Color.White.copy(alpha = 0.88f),
-                            fontSize = 12.sp,
-                            lineHeight = 16.sp
+                    .weight(1f)
+                    .fillMaxWidth(),
+                beyondBoundsPageCount = 1
+            ) { pageIndex ->
+                when (pageIndex) {
+                    // PAGE 0 (MENTOK PALING KIRI): HALAMAN SPOTLIGHT SEARCH & APP LIBRARY
+                    0 -> {
+                        LeftSearchPage(
+                            allApps = apps,
+                            onLaunchApp = { pkg -> launchApp(context, pkg) },
+                            onLongClickApp = { app ->
+                                triggerHaptic(context)
+                                selectedAppMenu = app
+                            }
                         )
                     }
-                }
 
-                // Widget Baterai Real-Time (MURNI INDIKATOR, KLIK SUDAH DINONAKTIFKAN)
-                val batteryColor = when {
-                    isCharging -> Color(0xFF30D158)
-                    batteryPct <= 20 -> Color(0xFFFF453A)
-                    else -> Color(0xFF30D158)
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(26.dp))
-                        .background(Color.White.copy(alpha = 0.15f))
-                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(26.dp))
-                        .padding(16.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                if (isCharging) "⚡ Mengisi" else "Baterai",
-                                color = Color.White,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 15.sp
-                            )
-                            Text(
-                                "$batteryPct%",
-                                color = batteryColor,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
-                        }
-                        Box(
+                    // PAGE 1: HALAMAN UTAMA PERTAMA (WIDGET CUACA + BATERAI + 12 APLIKASI)
+                    1 -> {
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(10.dp)
-                                .clip(RoundedCornerShape(5.dp))
-                                .background(Color.White.copy(alpha = 0.2f))
+                                .fillMaxSize()
+                                .padding(horizontal = 18.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp)
                         ) {
-                            Box(
+                            // Baris Widget Atas
+                            Row(
                                 modifier = Modifier
-                                    .fillMaxWidth((batteryPct / 100f).coerceIn(0.05f, 1f))
-                                    .fillMaxHeight()
-                                    .clip(RoundedCornerShape(5.dp))
-                                    .background(batteryColor)
-                            )
-                        }
-                        Text(
-                            if (isCharging) "Pengisian daya aktif" else "Kapasitas baterai saat ini",
-                            color = Color.White.copy(alpha = 0.78f),
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp
-                        )
-                    }
-                }
-            }
+                                    .fillMaxWidth()
+                                    .height(142.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                // Widget Cuaca
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(26.dp))
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(Color(0xFF1D6FA3).copy(alpha = 0.84f), Color(0xFF0F3460).copy(alpha = 0.84f))
+                                            )
+                                        )
+                                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(26.dp))
+                                        .padding(16.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column {
+                                            Text("Jakarta", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                                            Text("${weather.temp}°", color = Color.White, fontWeight = FontWeight.Light, fontSize = 38.sp)
+                                        }
+                                        Text(
+                                            "${weather.condition}\nT:${weather.high}°  R:${weather.low}°",
+                                            color = Color.White.copy(alpha = 0.88f),
+                                            fontSize = 12.sp,
+                                            lineHeight = 15.sp
+                                        )
+                                    }
+                                }
 
-            Spacer(modifier = Modifier.height(20.dp))
+                                // Widget Baterai (Pasif Non-Klik)
+                                val batteryColor = when {
+                                    isCharging -> Color(0xFF30D158)
+                                    batteryPct <= 20 -> Color(0xFFFF453A)
+                                    else -> Color(0xFF30D158)
+                                }
 
-            // --- 3. GRID APLIKASI ---
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(filteredApps, key = { it.packageName }) { app ->
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .combinedClickable(
-                                onClick = { launchApp(context, app.packageName) },
-                                onLongClick = {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(26.dp))
+                                        .background(Color.White.copy(alpha = 0.15f))
+                                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(26.dp))
+                                        .padding(16.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                if (isCharging) "⚡ Mengisi" else "Baterai",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 15.sp
+                                            )
+                                            Text(
+                                                "$batteryPct%",
+                                                color = batteryColor,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 16.sp
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(10.dp)
+                                                .clip(RoundedCornerShape(5.dp))
+                                                .background(Color.White.copy(alpha = 0.2f))
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth((batteryPct / 100f).coerceIn(0.05f, 1f))
+                                                    .fillMaxHeight()
+                                                    .clip(RoundedCornerShape(5.dp))
+                                                    .background(batteryColor)
+                                            )
+                                        }
+                                        Text(
+                                            if (isCharging) "Pengisian daya aktif" else "Kapasitas daya saat ini",
+                                            color = Color.White.copy(alpha = 0.78f),
+                                            fontSize = 11.sp,
+                                            lineHeight = 14.sp
+                                        )
+                                    }
+                                }
+                            }
+
+                            // 3 Baris x 4 Kolom Aplikasi di Halaman 1
+                            StaticAppPageGrid(
+                                pageApps = firstPageApps,
+                                onLaunchApp = { pkg -> launchApp(context, pkg) },
+                                onLongClickApp = { app ->
                                     triggerHaptic(context)
                                     selectedAppMenu = app
                                 }
                             )
-                    ) {
+                        }
+                    }
+
+                    // PAGE 2..N: HALAMAN APLIKASI PENUH (5 BARIS x 4 KOLOM TANPA SCROLL VERTIKAL)
+                    else -> {
+                        val pageApps = extraPages.getOrNull(pageIndex - 2) ?: emptyList()
                         Box(
                             modifier = Modifier
-                                .size(62.dp)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color.White.copy(alpha = 0.18f))
-                                .border(0.8.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-                                .padding(6.dp),
-                            contentAlignment = Alignment.Center
+                                .fillMaxSize()
+                                .padding(horizontal = 18.dp)
                         ) {
-                            Image(
-                                bitmap = app.icon,
-                                contentDescription = app.label,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(12.dp))
+                            StaticAppPageGrid(
+                                pageApps = pageApps,
+                                onLaunchApp = { pkg -> launchApp(context, pkg) },
+                                onLongClickApp = { app ->
+                                    triggerHaptic(context)
+                                    selectedAppMenu = app
+                                }
                             )
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = app.label,
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center
-                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // --- 4. SPOTLIGHT PILL ---
-            Box(
+            // 3. INDIKATOR TITIK HALAMAN ALA iOS (Menggantikan tombol Cari di atas Dock)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Color.White.copy(alpha = 0.18f))
-                    .border(0.6.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(20.dp))
-                    .clickable { showSpotlight = !showSpotlight }
-                    .padding(horizontal = 18.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black.copy(alpha = 0.22f))
+                    .padding(horizontal = 12.dp, vertical = 5.dp)
             ) {
-                Text("🔍 Cari", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                for (i in 0 until totalPages) {
+                    val isSelected = pagerState.currentPage == i
+                    Box(
+                        modifier = Modifier
+                            .size(if (i == 0) 8.dp else 7.dp)
+                            .clip(CircleShape)
+                            .background(
+                                when {
+                                    isSelected -> Color.White
+                                    i == 0 -> Color(0xFF64D2FF).copy(alpha = 0.55f) // Titik kiri penanda Search Page
+                                    else -> Color.White.copy(alpha = 0.32f)
+                                }
+                            )
+                            .clickable {
+                                coroutineScope.launch {
+                                    pagerState.animateScrollToPage(i)
+                                }
+                            }
+                    )
+                }
             }
 
-            AnimatedVisibility(visible = showSpotlight, enter = fadeIn(), exit = fadeOut()) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    placeholder = { Text("Spotlight Search aplikasi...", color = Color.White.copy(0.6f)) },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    shape = RoundedCornerShape(18.dp)
-                )
-            }
+            Spacer(modifier = Modifier.height(10.dp))
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // --- 5. GLASS DOCK BAWAH ---
+            // 4. GLASS DOCK BAWAH
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(92.dp)
+                    .padding(horizontal = 18.dp)
+                    .height(90.dp)
                     .padding(bottom = 8.dp)
                     .clip(RoundedCornerShape(34.dp))
                     .background(Color.White.copy(alpha = 0.18f))
@@ -715,6 +716,7 @@ fun IOS27LauncherScreen() {
             }
         }
 
+        // Context Menu saat ikon ditekan lama
         selectedAppMenu?.let { app ->
             AlertDialog(
                 onDismissRequest = { selectedAppMenu = null },
@@ -757,6 +759,170 @@ fun IOS27LauncherScreen() {
                     }
                 }
             )
+        }
+    }
+}
+
+// Grid Statis Ringan (Anti-Lag) untuk Setiap Halaman Geser Kanan-Kiri
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun StaticAppPageGrid(
+    pageApps: List<AppModel>,
+    onLaunchApp: (String) -> Unit,
+    onLongClickApp: (AppModel) -> Unit
+) {
+    val rows = remember(pageApps) { pageApps.chunked(4) }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        rows.forEach { rowApps ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                for (i in 0 until 4) {
+                    val app = rowApps.getOrNull(i)
+                    if (app != null) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .weight(1f)
+                                .combinedClickable(
+                                    onClick = { onLaunchApp(app.packageName) },
+                                    onLongClick = { onLongClickApp(app) }
+                                )
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Color.White.copy(alpha = 0.18f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.32f), RoundedCornerShape(16.dp))
+                                    .padding(5.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Image(
+                                    bitmap = app.icon,
+                                    contentDescription = app.label,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(12.dp))
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(5.dp))
+                            Text(
+                                text = app.label,
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Halaman Paling Kiri Mentok: Pencarian Aplikasi (Spotlight & App Library)
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun LeftSearchPage(
+    allApps: List<AppModel>,
+    onLaunchApp: (String) -> Unit,
+    onLongClickApp: (AppModel) -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val filtered by remember(allApps, query) {
+        derivedStateOf {
+            if (query.isBlank()) allApps
+            else allApps.filter { it.label.contains(query, ignoreCase = true) }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 18.dp)
+    ) {
+        // Kotak Pencarian Spotlight Khas iOS di Atas
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = {
+                Text("🔍 Perpustakaan App & Cari...", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.White.copy(alpha = 0.14f), RoundedCornerShape(20.dp)),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color.White.copy(alpha = 0.45f),
+                unfocusedBorderColor = Color.White.copy(alpha = 0.22f),
+                cursorColor = Color(0xFF0A84FF)
+            )
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Text(
+            text = if (query.isBlank()) "Semua Aplikasi (${allApps.size})" else "Hasil Pencarian (${filtered.size})",
+            color = Color.White.copy(alpha = 0.8f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)
+        )
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(4),
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(filtered, key = { it.packageName }) { app ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.combinedClickable(
+                        onClick = { onLaunchApp(app.packageName) },
+                        onLongClick = { onLongClickApp(app) }
+                    )
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(58.dp)
+                            .clip(RoundedCornerShape(15.dp))
+                            .background(Color.White.copy(alpha = 0.18f))
+                            .border(0.8.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(15.dp))
+                            .padding(5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            bitmap = app.icon,
+                            contentDescription = app.label,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(11.dp))
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Text(
+                        text = app.label,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
         }
     }
 }
