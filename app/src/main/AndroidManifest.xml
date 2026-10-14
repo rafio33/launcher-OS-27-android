@@ -12,7 +12,7 @@
         android:allowBackup="true"
         android:label="iOS 27 Spatial"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Wallpaper">
+        android:theme="@android:style/Theme.Wallpaper.NoTitleBar">
 
         <activity
             android:name=".MainActivity"
