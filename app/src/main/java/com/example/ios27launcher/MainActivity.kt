@@ -27,6 +27,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -77,24 +78,19 @@ data class WeatherData(
     val low: Int = 25
 )
 
-enum class IslandMode {
-    IDLE,
-    CHARGING,
-    MUSIC_COMPACT,
-    MUSIC_EXPANDED,
-    RECORDING_COMPACT,
-    RECORDING_EXPANDED,
-    ALARM_COMPACT,
-    ALARM_EXPANDED
+enum class IslandActiveFeature {
+    SPOTIFY,
+    VOICE_MEMO,
+    ALARM
 }
 
-// State Pemutar Musik Spotify (Aman, Tanpa Izin Berbahaya, Tidak Dicekal Play Protect)
+// Controller Spotify & Media (Aman, Tanpa Izin Rahasia / Bebas Cekal Play Protect)
 object SpotifyMediaState {
     var isPlaying by mutableStateOf(false)
-    var trackTitle by mutableStateOf("Spotify")
-    var trackArtist by mutableStateOf("Siap memutar musik")
+    var trackTitle by mutableStateOf("Spotify Musik")
+    var trackArtist by mutableStateOf("Sentuh untuk buka Spotify")
     var albumTitle by mutableStateOf("")
-    var trackDurationMs by mutableLongStateOf(0L)
+    var trackDurationMs by mutableLongStateOf(210000L)
     var trackPositionMs by mutableLongStateOf(0L)
     var hasTrackInfo by mutableStateOf(false)
 
@@ -212,22 +208,24 @@ fun IOS27LauncherScreen() {
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // Spotify Broadcast Receiver (Membaca event lagu asli langsung dari Spotify)
+    // Spotify Broadcast Receiver (Membaca info lagu asli saat Spotify berputar)
     DisposableEffect(context) {
         val spotifyReceiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 if (intent == null) return
                 when (intent.action) {
                     "com.spotify.music.metadatachanged" -> {
-                        val track = intent.getStringExtra("track") ?: return
+                        val track = intent.getStringExtra("track")
                         val artist = intent.getStringExtra("artist") ?: "Spotify"
                         val album = intent.getStringExtra("album") ?: ""
                         val length = intent.getIntExtra("length", 0)
-                        SpotifyMediaState.trackTitle = track
-                        SpotifyMediaState.trackArtist = artist
-                        SpotifyMediaState.albumTitle = album
-                        if (length > 0) SpotifyMediaState.trackDurationMs = length.toLong()
-                        SpotifyMediaState.hasTrackInfo = true
+                        if (!track.isNullOrBlank()) {
+                            SpotifyMediaState.trackTitle = track
+                            SpotifyMediaState.trackArtist = artist
+                            SpotifyMediaState.albumTitle = album
+                            if (length > 0) SpotifyMediaState.trackDurationMs = length.toLong()
+                            SpotifyMediaState.hasTrackInfo = true
+                        }
                     }
                     "com.spotify.music.playbackstatechanged" -> {
                         val playing = intent.getBooleanExtra("playing", false)
@@ -254,7 +252,7 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Periksa status musik sistem
+    // Cek apakah sistem audio HP sedang memainkan musik
     LaunchedEffect(Unit) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         if (am?.isMusicActive == true) {
@@ -348,8 +346,8 @@ fun IOS27LauncherScreen() {
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Spacer pas di bawah lubang kamera & compact dynamic island
-            Spacer(modifier = Modifier.height(48.dp))
+            // Spacer pas di bawah Dynamic Island
+            Spacer(modifier = Modifier.height(56.dp))
 
             HorizontalPager(
                 state = pagerState,
@@ -530,13 +528,13 @@ fun IOS27LauncherScreen() {
             )
         }
 
-        // LAYER 2: DYNAMIC ISLAND TEPAT DI LUBANG KAMERA PUNCH-HOLE ATAS
-        // top = 6.dp menempel pas di sekitar lubang kamera depan tanpa terdorong ke bawah
+        // LAYER 2: DYNAMIC ISLAND INTERAKTIF (MUDAH DIKLIK & LENGKAP DENGAN MENU)
+        // Posisi top = 10.dp menjamin sentuhan jari langsung terdeteksi tanpa terhalang gesture bar status Android
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 6.dp)
-                .zIndex(10f),
+                .padding(top = 10.dp)
+                .zIndex(20f),
             contentAlignment = Alignment.TopCenter
         ) {
             DynamicIslandBar(
@@ -557,38 +555,46 @@ fun IOS27LauncherScreen() {
 }
 
 // ==========================================
-// DYNAMIC ISLAND BAR (SPOTIFY & ZERO LAG)
+// DYNAMIC ISLAND BAR (INTERAKTIF & RINGAN)
 // ==========================================
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DynamicIslandBar(
     batteryPct: Int,
     isCharging: Boolean
 ) {
     val context = LocalContext.current
-    var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
+    var isExpanded by remember { mutableStateOf(false) }
+    var activeTab by remember { mutableStateOf(IslandActiveFeature.SPOTIFY) }
 
-    // Membaca state real Spotify langsung dari SpotifyMediaState
+    // State Spotify
     val isPlaying = SpotifyMediaState.isPlaying
     val trackTitle = SpotifyMediaState.trackTitle
     val trackArtist = SpotifyMediaState.trackArtist
     val durationMs = SpotifyMediaState.trackDurationMs
     var localPositionMs by remember { mutableLongStateOf(0L) }
 
-    // State Perekam Suara Terisolasi
+    // State Perekam Suara (Voice Memo)
+    var isRecording by remember { mutableStateOf(false) }
     var recordSeconds by remember { mutableIntStateOf(0) }
 
-    // State Alarm Terisolasi
+    // State Alarm & Timer
+    var isAlarmRunning by remember { mutableStateOf(false) }
     var alarmSeconds by remember { mutableIntStateOf(45) }
 
-    // Otomatis aktifkan Compact Music saat Spotify sedang berputar
-    LaunchedEffect(isPlaying) {
-        if (isPlaying && islandMode == IslandMode.IDLE) {
-            islandMode = IslandMode.MUSIC_COMPACT
+    // State Animasi Charger
+    var showChargingBanner by remember { mutableStateOf(false) }
+
+    // Deteksi kabel charger dicolok
+    LaunchedEffect(isCharging) {
+        if (isCharging) {
+            triggerHaptic(context)
+            showChargingBanner = true
+            delay(3500)
+            showChargingBanner = false
         }
     }
 
-    // Sinkronisasi posisi progress lagu saat playing
+    // Timer Putar Spotify
     LaunchedEffect(isPlaying, SpotifyMediaState.trackPositionMs) {
         localPositionMs = SpotifyMediaState.trackPositionMs
         while (isPlaying) {
@@ -597,420 +603,110 @@ fun DynamicIslandBar(
         }
     }
 
-    // Otomatis Aktifkan Animasi Charger Saat Dicolok
-    LaunchedEffect(isCharging) {
-        if (isCharging) {
-            triggerHaptic(context)
-            val prev = islandMode
-            islandMode = IslandMode.CHARGING
-            delay(3500)
-            if (islandMode == IslandMode.CHARGING) {
-                islandMode = if (isPlaying) IslandMode.MUSIC_COMPACT else prev.takeIf { it != IslandMode.CHARGING } ?: IslandMode.IDLE
-            }
-        }
-    }
-
-    // Timer Rekaman
-    LaunchedEffect(islandMode) {
-        if (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
-            while (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
-                delay(1000)
-                recordSeconds++
-            }
-        } else {
-            recordSeconds = 0
+    // Timer Perekam Suara
+    LaunchedEffect(isRecording) {
+        while (isRecording) {
+            delay(1000)
+            recordSeconds++
         }
     }
 
     // Timer Alarm
-    LaunchedEffect(islandMode) {
-        if (islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) {
-            while ((islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) && alarmSeconds > 0) {
-                delay(1000)
-                alarmSeconds--
-            }
-            if (alarmSeconds <= 0) {
-                triggerHaptic(context)
-                islandMode = if (isPlaying) IslandMode.MUSIC_COMPACT else IslandMode.IDLE
-            }
+    LaunchedEffect(isAlarmRunning) {
+        while (isAlarmRunning && alarmSeconds > 0) {
+            delay(1000)
+            alarmSeconds--
+        }
+        if (alarmSeconds <= 0 && isAlarmRunning) {
+            isAlarmRunning = false
+            triggerHaptic(context)
         }
     }
 
-    // Animasi Pegas Dynamic Island (Smooth Spring Curve)
+    // Pegas Animasi Dynamic Island
     val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
 
-    val targetWidth = when (islandMode) {
-        IslandMode.IDLE -> 110f
-        IslandMode.CHARGING -> 268f
-        IslandMode.MUSIC_COMPACT -> 205f
-        IslandMode.MUSIC_EXPANDED -> 344f
-        IslandMode.RECORDING_COMPACT -> 180f
-        IslandMode.RECORDING_EXPANDED -> 330f
-        IslandMode.ALARM_COMPACT -> 175f
-        IslandMode.ALARM_EXPANDED -> 320f
+    val targetWidth = when {
+        isExpanded -> 344f
+        showChargingBanner -> 268f
+        isRecording -> 180f
+        isAlarmRunning -> 175f
+        isPlaying -> 215f
+        else -> 150f
     }
     val animatedWidth by animateFloatAsState(targetValue = targetWidth, animationSpec = springSpec, label = "w")
 
-    val targetHeight = when (islandMode) {
-        IslandMode.IDLE -> 33f
-        IslandMode.CHARGING -> 46f
-        IslandMode.MUSIC_COMPACT -> 36f
-        IslandMode.MUSIC_EXPANDED -> 184f
-        IslandMode.RECORDING_COMPACT -> 38f
-        IslandMode.RECORDING_EXPANDED -> 88f
-        IslandMode.ALARM_COMPACT -> 38f
-        IslandMode.ALARM_EXPANDED -> 86f
+    val targetHeight = when {
+        isExpanded -> 210f
+        showChargingBanner -> 44f
+        else -> 38f
     }
     val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
 
-    // Kontainer Dynamic Island Melayang Pas di Sekitar Lubang Kamera
+    // Kontainer Dynamic Island
     Box(
         modifier = Modifier
             .width(animatedWidth.dp)
             .height(animatedHeight.dp)
-            .clip(RoundedCornerShape(if (islandMode == IslandMode.MUSIC_EXPANDED) 38.dp else 42.dp))
+            .clip(RoundedCornerShape(if (isExpanded) 34.dp else 40.dp))
             .background(Color.Black)
             .border(
-                0.7.dp,
-                Color.White.copy(alpha = 0.22f),
-                RoundedCornerShape(if (islandMode == IslandMode.MUSIC_EXPANDED) 38.dp else 42.dp)
+                0.8.dp,
+                Color.White.copy(alpha = 0.25f),
+                RoundedCornerShape(if (isExpanded) 34.dp else 40.dp)
             )
-            .combinedClickable(
-                onClick = {
-                    triggerHaptic(context)
-                    islandMode = when (islandMode) {
-                        IslandMode.IDLE -> IslandMode.MUSIC_EXPANDED
-                        IslandMode.CHARGING -> if (isPlaying) IslandMode.MUSIC_COMPACT else IslandMode.IDLE
-                        IslandMode.MUSIC_COMPACT -> IslandMode.MUSIC_EXPANDED
-                        IslandMode.MUSIC_EXPANDED -> IslandMode.MUSIC_COMPACT
-                        IslandMode.RECORDING_COMPACT -> IslandMode.RECORDING_EXPANDED
-                        IslandMode.RECORDING_EXPANDED -> IslandMode.RECORDING_COMPACT
-                        IslandMode.ALARM_COMPACT -> IslandMode.ALARM_EXPANDED
-                        IslandMode.ALARM_EXPANDED -> IslandMode.ALARM_COMPACT
-                    }
-                },
-                onLongClick = {
-                    triggerHaptic(context)
-                    islandMode = when (islandMode) {
-                        IslandMode.IDLE -> IslandMode.MUSIC_COMPACT
-                        IslandMode.MUSIC_COMPACT, IslandMode.MUSIC_EXPANDED -> IslandMode.RECORDING_COMPACT
-                        IslandMode.RECORDING_COMPACT, IslandMode.RECORDING_EXPANDED -> {
-                            alarmSeconds = 45
-                            IslandMode.ALARM_COMPACT
-                        }
-                        else -> IslandMode.IDLE
-                    }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                triggerHaptic(context)
+                if (!isExpanded) {
+                    isExpanded = true
                 }
-            )
-            .padding(horizontal = if (islandMode == IslandMode.MUSIC_EXPANDED) 16.dp else 12.dp),
+            }
+            .padding(horizontal = if (isExpanded) 14.dp else 12.dp, vertical = if (isExpanded) 10.dp else 0.dp),
         contentAlignment = Alignment.Center
     ) {
-        AnimatedContent(
-            targetState = islandMode,
-            transitionSpec = {
-                (fadeIn(tween(170, delayMillis = 40)) + scaleIn(initialScale = 0.94f))
-                    .togetherWith(fadeOut(tween(110)) + scaleOut(targetScale = 0.94f))
-            },
-            label = "islandContent"
-        ) { mode ->
-            when (mode) {
-                IslandMode.IDLE -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Titik kamera punch-hole kiri
-                        Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101014)))
-                        // Indikator status kanan
-                        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (isCharging) Color(0xFF30D158) else Color(0xFF18181E)))
-                    }
-                }
-
-                IslandMode.CHARGING -> {
+        if (!isExpanded) {
+            // MODE COMPACT (Kecil / Menempel di Kamera Atas)
+            when {
+                showChargingBanner -> {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("⚡", fontSize = 15.sp)
+                            Text("⚡", fontSize = 14.sp)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Mengisi Daya", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Mengisi Daya", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
-                        Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
-                IslandMode.MUSIC_COMPACT -> {
+                isRecording -> {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Kiri: Ikon Spotify Hijau Khas
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF1DB954)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("🎵", fontSize = 10.sp)
-                            }
-                            Spacer(modifier = Modifier.width(7.dp))
-                            Text(
-                                text = trackTitle,
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.widthIn(max = 100.dp)
-                            )
+                            Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF453A)))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Memo", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                         }
-
-                        // Kanan: Mini Equalizer Hijau Spotify di Canvas 60 FPS
-                        MiniEqualizer(
-                            isPlaying = isPlaying,
-                            barColor = Color(0xFF1DB954),
-                            modifier = Modifier.size(width = 22.dp, height = 15.dp)
-                        )
-                    }
-                }
-
-                IslandMode.MUSIC_EXPANDED -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp),
-                        verticalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        // Header Baris 1: Cover Album Spotify + Info Judul & Artis + Waveform
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(50.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(
-                                        Brush.linearGradient(
-                                            listOf(Color(0xFF1DB954), Color(0xFF191414))
-                                        )
-                                    )
-                                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
-                                    .clickable { SpotifyMediaState.openSpotify(context) },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("🎧", fontSize = 24.sp)
-                            }
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = trackTitle,
-                                    color = Color.White,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = trackArtist,
-                                    color = Color.White.copy(alpha = 0.72f),
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-
-                            // Dynamic Waveform Spotify Hijau
-                            ExpandedWaveformVisualizer(
-                                isPlaying = isPlaying,
-                                barColor = Color(0xFF1DB954),
-                                modifier = Modifier.size(width = 44.dp, height = 24.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // Timeline Durasi Real Lagu Spotify
-                        val currentSec = (localPositionMs / 1000L).coerceAtLeast(0L)
-                        val totalSec = (durationMs / 1000L).coerceAtLeast(0L)
-                        val progressRatio = if (totalSec > 0) (currentSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) else 0f
-
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(4.dp)
-                                    .clip(RoundedCornerShape(2.dp))
-                                    .background(Color.White.copy(alpha = 0.22f))
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth(progressRatio)
-                                        .fillMaxHeight()
-                                        .clip(RoundedCornerShape(2.dp))
-                                        .background(Color(0xFF1DB954))
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = String.format("%02d:%02d", currentSec / 60, currentSec % 60),
-                                    color = Color.White.copy(alpha = 0.6f),
-                                    fontSize = 10.sp
-                                )
-                                Text(
-                                    text = if (totalSec > 0) String.format("%02d:%02d", totalSec / 60, totalSec % 60) else "--:--",
-                                    color = Color.White.copy(alpha = 0.6f),
-                                    fontSize = 10.sp
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        // Kontrol Musik Real Spotify (Prev, Play/Pause, Next, Buka Spotify)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(
-                                onClick = { islandMode = IslandMode.MUSIC_COMPACT },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Text("▾", color = Color.White.copy(alpha = 0.7f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            // Previous Song di Spotify
-                            IconButton(
-                                onClick = {
-                                    triggerHaptic(context)
-                                    SpotifyMediaState.previous(context)
-                                },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Text("⏮", color = Color.White, fontSize = 18.sp)
-                            }
-
-                            // Play / Pause Real Spotify
-                            Box(
-                                modifier = Modifier
-                                    .size(42.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White)
-                                    .clickable {
-                                        triggerHaptic(context)
-                                        SpotifyMediaState.playPause(context)
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (isPlaying) "⏸" else "▶",
-                                    color = Color.Black,
-                                    fontSize = 17.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            // Next Song di Spotify
-                            IconButton(
-                                onClick = {
-                                    triggerHaptic(context)
-                                    SpotifyMediaState.next(context)
-                                },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Text("⏭", color = Color.White, fontSize = 18.sp)
-                            }
-
-                            // Tombol Buka Spotify
-                            IconButton(
-                                onClick = {
-                                    triggerHaptic(context)
-                                    SpotifyMediaState.openSpotify(context)
-                                },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Text("🟢", fontSize = 14.sp)
-                            }
-                        }
-                    }
-                }
-
-                IslandMode.RECORDING_COMPACT -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF453A)))
                         Text(
                             String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
                             color = Color(0xFFFF453A),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        MiniEqualizer(
-                            isPlaying = true,
-                            barColor = Color(0xFFFF9F0A),
-                            modifier = Modifier.size(width = 20.dp, height = 14.dp)
-                        )
+                        MiniEqualizer(isPlaying = true, barColor = Color(0xFFFF9F0A), modifier = Modifier.size(18.dp, 12.dp))
                     }
                 }
 
-                IslandMode.RECORDING_EXPANDED -> {
-                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF453A)))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Memo Suara", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            }
-                            Text(
-                                String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
-                                color = Color(0xFFFF453A),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            ExpandedWaveformVisualizer(
-                                isPlaying = true,
-                                barColor = Color(0xFFFF9F0A),
-                                modifier = Modifier.size(width = 80.dp, height = 22.dp)
-                            )
-                            Button(
-                                onClick = { islandMode = IslandMode.IDLE },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF453A)),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
-                            ) {
-                                Text("Berhenti", fontSize = 11.sp, color = Color.White)
-                            }
-                        }
-                    }
-                }
-
-                IslandMode.ALARM_COMPACT -> {
+                isAlarmRunning -> {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1021,28 +717,358 @@ fun DynamicIslandBar(
                     }
                 }
 
-                IslandMode.ALARM_EXPANDED -> {
-                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
+                isPlaying -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("🟢", fontSize = 10.sp)
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = trackTitle,
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 110.dp)
+                            )
+                        }
+                        MiniEqualizer(isPlaying = true, barColor = Color(0xFF1DB954), modifier = Modifier.size(20.dp, 13.dp))
+                    }
+                }
+
+                else -> {
+                    // Siaga Normal (Kamera Punchhole Kiri + Teks Kanan)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101014)))
+                        Text("iOS 27 • Buka", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(Color(0xFF30D158)))
+                    }
+                }
+            }
+        } else {
+            // MODE EXPANDED: MENU LENGKAP (SPOTIFY, PEREKAM SUARA, ALARM)
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Header Baris 1: Tab Pilihan Menu Interaktif (Bisa Langsung Diklik)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // Tab Spotify
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (activeTab == IslandActiveFeature.SPOTIFY) Color(0xFF1DB954) else Color.White.copy(0.12f))
+                                .clickable {
+                                    triggerHaptic(context)
+                                    activeTab = IslandActiveFeature.SPOTIFY
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                "🎵 Spotify",
+                                color = if (activeTab == IslandActiveFeature.SPOTIFY) Color.Black else Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Tab Perekam Suara
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (activeTab == IslandActiveFeature.VOICE_MEMO) Color(0xFFFF453A) else Color.White.copy(0.12f))
+                                .clickable {
+                                    triggerHaptic(context)
+                                    activeTab = IslandActiveFeature.VOICE_MEMO
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                "🎙️ Perekam",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Tab Alarm
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (activeTab == IslandActiveFeature.ALARM) Color(0xFFFF9F0A) else Color.White.copy(0.12f))
+                                .clickable {
+                                    triggerHaptic(context)
+                                    activeTab = IslandActiveFeature.ALARM
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                "⏰ Alarm",
+                                color = if (activeTab == IslandActiveFeature.ALARM) Color.Black else Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    // Tombol Kecilkan / Tutup
+                    IconButton(
+                        onClick = {
+                            triggerHaptic(context)
+                            isExpanded = false
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Text("▾", color = Color.White.copy(alpha = 0.8f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // Konten Sesuai Tab yang Dipilih
+                when (activeTab) {
+                    IslandActiveFeature.SPOTIFY -> {
+                        // KONTEN SPOTIFY
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF1DB954))
+                                    .clickable { SpotifyMediaState.openSpotify(context) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("🎧", fontSize = 22.sp)
+                            }
+
+                            Spacer(modifier = Modifier.width(10.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = trackTitle,
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = trackArtist,
+                                    color = Color.White.copy(alpha = 0.72f),
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            ExpandedWaveformVisualizer(isPlaying = isPlaying, barColor = Color(0xFF1DB954), modifier = Modifier.size(38.dp, 20.dp))
+                        }
+
+                        // Timeline Durasi
+                        val currentSec = (localPositionMs / 1000L).coerceAtLeast(0L)
+                        val totalSec = (durationMs / 1000L).coerceAtLeast(1L)
+                        val progressRatio = (currentSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f)
+
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(3.5.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(Color.White.copy(0.2f))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(progressRatio)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(Color(0xFF1DB954))
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(String.format("%02d:%02d", currentSec / 60, currentSec % 60), color = Color.White.copy(0.6f), fontSize = 10.sp)
+                                Text(String.format("%02d:%02d", totalSec / 60, totalSec % 60), color = Color.White.copy(0.6f), fontSize = 10.sp)
+                            }
+                        }
+
+                        // Tombol Kontrol Musik
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = { SpotifyMediaState.previous(context); triggerHaptic(context) }, modifier = Modifier.size(34.dp)) {
+                                Text("⏮", color = Color.White, fontSize = 16.sp)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .clickable { SpotifyMediaState.playPause(context); triggerHaptic(context) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(if (isPlaying) "⏸" else "▶", color = Color.Black, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            }
+                            IconButton(onClick = { SpotifyMediaState.next(context); triggerHaptic(context) }, modifier = Modifier.size(34.dp)) {
+                                Text("⏭", color = Color.White, fontSize = 16.sp)
+                            }
+                            Button(
+                                onClick = { SpotifyMediaState.openSpotify(context); triggerHaptic(context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1DB954)),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                            ) {
+                                Text("Buka Spotify", fontSize = 11.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    IslandActiveFeature.VOICE_MEMO -> {
+                        // KONTEN PEREKAM SUARA (VOICE MEMO)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("⏰", fontSize = 14.sp)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Alarm Berjalan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Box(modifier = Modifier.size(12.dp).clip(CircleShape).background(if (isRecording) Color(0xFFFF453A) else Color.Gray))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text("Perekam Suara iOS", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (isRecording) "Sedang merekam suara..." else "Siap merekam", color = Color.White.copy(0.7f), fontSize = 11.sp)
+                                }
                             }
-                            Text(String.format("%02ds lagi", alarmSeconds), color = Color(0xFFFF9F0A), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
+                                color = Color(0xFFFF453A),
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+
+                        // Waveform Gelombang Suara Oranye
+                        ExpandedWaveformVisualizer(isPlaying = isRecording, barColor = Color(0xFFFF9F0A), modifier = Modifier.fillMaxWidth().height(26.dp))
+
+                        // Tombol Mulai / Berhenti / Reset
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Button(
-                                onClick = { islandMode = IslandMode.IDLE },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
+                                onClick = {
+                                    triggerHaptic(context)
+                                    isRecording = !isRecording
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = if (isRecording) Color(0xFFFF453A) else Color(0xFF30D158)),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
                             ) {
-                                Text("Matikan", fontSize = 11.sp, color = Color.White)
+                                Text(if (isRecording) "⏹ Berhenti" else "● Mulai Rekam", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = {
+                                    triggerHaptic(context)
+                                    isRecording = false
+                                    recordSeconds = 0
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
+                            ) {
+                                Text("🔄 Reset", fontSize = 12.sp, color = Color.White)
+                            }
+                        }
+                    }
+
+                    IslandActiveFeature.ALARM -> {
+                        // KONTEN ALARM & TIMER
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("⏰", fontSize = 18.sp)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text("Timer Alarm", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (isAlarmRunning) "Hitungan mundur aktif" else "Siap dimulai", color = Color.White.copy(0.7f), fontSize = 11.sp)
+                                }
+                            }
+                            Text(
+                                String.format("%02ds", alarmSeconds),
+                                color = Color(0xFFFF9F0A),
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Pilihan Waktu Cepat
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            listOf(30 to "+30s", 60 to "+1m", 300 to "+5m").forEach { (sec, label) ->
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color.White.copy(0.15f))
+                                        .clickable {
+                                            triggerHaptic(context)
+                                            alarmSeconds += sec
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text(label, color = Color.White, fontSize = 11.sp)
+                                }
+                            }
+                        }
+
+                        // Tombol Kontrol Alarm
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = {
+                                    triggerHaptic(context)
+                                    isAlarmRunning = !isAlarmRunning
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9F0A)),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+                            ) {
+                                Text(if (isAlarmRunning) "⏸ Jeda" else "▶ Mulai Timer", fontSize = 12.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = {
+                                    triggerHaptic(context)
+                                    isAlarmRunning = false
+                                    alarmSeconds = 45
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
+                            ) {
+                                Text("🔄 Reset", fontSize = 12.sp, color = Color.White)
                             }
                         }
                     }
