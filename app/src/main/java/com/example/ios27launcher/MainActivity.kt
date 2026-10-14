@@ -2,6 +2,9 @@ package com.example.ios27launcher
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -30,14 +33,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.WindowCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -48,13 +49,21 @@ data class AppModel(
     val icon: ImageBitmap
 )
 
+fun drawableToBitmap(drawable: Drawable): ImageBitmap {
+    val bmp = Bitmap.createBitmap(140, 140, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    drawable.setBounds(0, 0, canvas.width, canvas.height)
+    drawable.draw(canvas)
+    return bmp.asImageBitmap()
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() { /* Tetap di Home Screen */ }
+            override fun handleOnBackPressed() { }
         })
 
         setContent {
@@ -71,7 +80,7 @@ fun IOS27LauncherScreen() {
     var searchQuery by remember { mutableStateOf("") }
     var showSpotlight by remember { mutableStateOf(false) }
     var islandExpanded by remember { mutableStateOf(false) }
-    var iconMode by remember { mutableStateOf(0) } // 0: Light, 1: Dark, 2: Tinted Blue
+    var iconMode by remember { mutableStateOf(0) }
     var selectedAppMenu by remember { mutableStateOf<AppModel?>(null) }
 
     LaunchedEffect(Unit) {
@@ -87,7 +96,7 @@ fun IOS27LauncherScreen() {
                 AppModel(
                     label = info.loadLabel(pm).toString(),
                     packageName = pkg,
-                    icon = info.loadIcon(pm).toBitmap(140, 140).asImageBitmap()
+                    icon = drawableToBitmap(info.loadIcon(pm))
                 )
             }.sortedBy { it.label.lowercase() }
             apps = loadedApps
@@ -122,7 +131,6 @@ fun IOS27LauncherScreen() {
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 1. DYNAMIC ISLAND INTERAKTIF
             val islandWidth by animateDpAsState(if (islandExpanded) 330.dp else 136.dp, label = "")
             val islandHeight by animateDpAsState(if (islandExpanded) 88.dp else 35.dp, label = "")
 
@@ -182,14 +190,12 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // 2. WIDGET BARIS ATAS ALA APPLE HIG
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(145.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Cupertino Weather Widget
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -215,7 +221,6 @@ fun IOS27LauncherScreen() {
                     }
                 }
 
-                // Spatial Battery Widget
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -236,15 +241,21 @@ fun IOS27LauncherScreen() {
                             Text("Android 14", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                             Text("94%", color = Color(0xFF30D158), fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         }
-                        LinearProgressIndicator(
-                            progress = 0.94f,
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(8.dp)
-                                .clip(RoundedCornerShape(4.dp)),
-                            color = Color(0xFF30D158),
-                            trackColor = Color.White.copy(alpha = 0.2f),
-                        )
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.White.copy(alpha = 0.2f))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.94f)
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFF30D158))
+                            )
+                        }
                         Text(
                             "Ketuk Dynamic Island untuk mode ikon iOS 18/27",
                             color = Color.White.copy(alpha = 0.75f),
@@ -257,7 +268,6 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // 3. GRID APLIKASI UTAMA (APPLE SQUIRCLE)
             LazyVerticalGrid(
                 columns = GridCells.Fixed(4),
                 modifier = Modifier.weight(1f),
@@ -323,7 +333,6 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 4. KAPSUL SPOTLIGHT SEARCH DI ATAS DOCK ("Cari")
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
@@ -344,19 +353,12 @@ fun IOS27LauncherScreen() {
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 8.dp),
-                    shape = RoundedCornerShape(18.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF0A84FF),
-                        unfocusedBorderColor = Color.White.copy(0.3f)
-                    )
+                    shape = RoundedCornerShape(18.dp)
                 )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // 5. GLASS DOCK BAWAH
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -395,7 +397,6 @@ fun IOS27LauncherScreen() {
             }
         }
 
-        // 6. 3D HAPTIC TOUCH CONTEXT MENU
         selectedAppMenu?.let { app ->
             AlertDialog(
                 onDismissRequest = { selectedAppMenu = null },
@@ -406,7 +407,6 @@ fun IOS27LauncherScreen() {
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Paket: ${app.packageName}", fontSize = 12.sp)
-                        Divider(color = Color.White.copy(0.15f))
                         Text(
                             "📱 Buka Aplikasi",
                             modifier = Modifier
