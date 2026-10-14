@@ -28,12 +28,14 @@ jobs:
           gradle-version: '8.5'
 
           
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+      - name: Build Optimized Release & Debug APK
+        run: gradle assembleRelease assembleDebug --no-daemon
 
       - name: Upload Compiled APK Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: iOS27-Spatial-Launcher-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/debug/app-debug.apk

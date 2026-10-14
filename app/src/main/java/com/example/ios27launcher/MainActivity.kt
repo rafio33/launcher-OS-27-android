@@ -1,26 +1,23 @@
 package com.example.ios27launcher
 
-import android.app.AppOpsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.drawable.Drawable
-import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
-import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -40,6 +37,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.Dispatchers
@@ -73,29 +75,40 @@ data class WeatherData(
     val low: Int = 25
 )
 
+@Immutable
+data class SongTrack(
+    val title: String,
+    val artist: String,
+    val durationSeconds: Int = 210,
+    val themeColor: Color = Color(0xFFFA2D48)
+)
+
+val samplePlaylist = listOf(
+    SongTrack("Starboy", "The Weeknd ft. Daft Punk", 230, Color(0xFFFA2D48)),
+    SongTrack("Blinding Lights", "The Weeknd", 200, Color(0xFFFF9500)),
+    SongTrack("Espresso", "Sabrina Carpenter", 175, Color(0xFF007AFF)),
+    SongTrack("Golden Hour", "JVKE", 210, Color(0xFFFFCC00)),
+    SongTrack("Cruel Summer", "Taylor Swift", 178, Color(0xFFFF2D55))
+)
+
 enum class IslandMode {
     IDLE,
     CHARGING,
     MUSIC_COMPACT,
     MUSIC_EXPANDED,
     RECORDING_COMPACT,
-    RECORDING_EXPANDED
+    RECORDING_EXPANDED,
+    ALARM_COMPACT,
+    ALARM_EXPANDED
 }
 
-// Cache global untuk ikon agar tidak render ulang saat swipe halaman
-private val iconCache = mutableMapOf<String, ImageBitmap>()
-
-fun getCachedOrCompressedIcon(context: Context, packageName: String, drawable: Drawable?): ImageBitmap {
-    if (iconCache.containsKey(packageName)) {
-        return iconCache[packageName]!!
-    }
-    val bmp = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bmp)
-    drawable?.setBounds(0, 0, canvas.width, canvas.height)
-    drawable?.draw(canvas)
-    val imageBitmap = bmp.asImageBitmap()
-    iconCache[packageName] = imageBitmap
-    return imageBitmap
+// Konversi drawable ke ImageBitmap dioptimalkan ke 112px untuk efisiensi memori & render GPU
+fun drawableToBitmap(drawable: Drawable): ImageBitmap {
+    val bmp = Bitmap.createBitmap(112, 112, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+    drawable.setBounds(0, 0, canvas.width, canvas.height)
+    drawable.draw(canvas)
+    return bmp.asImageBitmap()
 }
 
 class MainActivity : ComponentActivity() {
@@ -141,16 +154,14 @@ fun IOS27LauncherScreen() {
     var apps by remember { mutableStateOf<List<AppModel>>(emptyList()) }
     var selectedAppMenu by remember { mutableStateOf<AppModel?>(null) }
 
+    // State Baterai Real-Time
     var batteryPct by remember { mutableIntStateOf(100) }
     var isCharging by remember { mutableStateOf(false) }
 
-    var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
-    var recordSeconds by remember { mutableIntStateOf(0) }
-    var isPlayingMusic by remember { mutableStateOf(true) }
-
+    // State Cuaca Real-Time
     var weather by remember { mutableStateOf(WeatherData()) }
 
-    // Deteksi Status Baterai & Musik Aktif
+    // Sensor Baterai
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -161,39 +172,15 @@ fun IOS27LauncherScreen() {
                     batteryPct = (level * 100) / scale
                 }
                 val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-                val nowCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                         status == BatteryManager.BATTERY_STATUS_FULL
-
-                if (nowCharging && !isCharging) {
-                    triggerHaptic(context)
-                    islandMode = IslandMode.CHARGING
-                }
-                isCharging = nowCharging
             }
         }
         context.registerReceiver(receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    LaunchedEffect(islandMode) {
-        if (islandMode == IslandMode.CHARGING) {
-            delay(3000)
-            if (islandMode == IslandMode.CHARGING) islandMode = IslandMode.IDLE
-        }
-    }
-
-    LaunchedEffect(islandMode) {
-        if (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
-            while (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
-                delay(1000)
-                recordSeconds++
-            }
-        } else {
-            recordSeconds = 0
-        }
-    }
-
-    // Cuaca Live
+    // Ambil Data Cuaca Live
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
@@ -227,7 +214,7 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Load Aplikasi dengan Caching Cepat
+    // Muat Aplikasi Sekali di Background Thread
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val pm = context.packageManager
@@ -236,213 +223,56 @@ fun IOS27LauncherScreen() {
             apps = resolveInfos.mapNotNull { info ->
                 val pkg = info.activityInfo.packageName
                 if (pkg == context.packageName) return@mapNotNull null
-                val label = info.loadLabel(pm).toString()
-                val rawIcon = info.loadIcon(pm)
-                val compressedIcon = getCachedOrCompressedIcon(context, pkg, rawIcon)
-                AppModel(label, pkg, compressedIcon)
+                AppModel(info.loadLabel(pm).toString(), pkg, drawableToBitmap(info.loadIcon(pm)))
             }.sortedBy { it.label.lowercase() }
         }
     }
 
-    val firstPageApps by remember(apps) { derivedStateOf { apps.take(12) } }
+    // Pembagian Halaman:
+    // Page 0 = Halaman Search & App Library (Paling Kiri Mentok)
+    // Page 1 = Widget Atas + 12 Aplikasi (3 baris x 4 kolom)
+    // Page 2..N = Masing-masing 20 Aplikasi (5 baris x 4 kolom)
+    val firstPageApps by remember(apps) {
+        derivedStateOf { apps.take(12) }
+    }
     val extraPages by remember(apps) {
-        derivedStateOf { if (apps.size > 12) apps.drop(12).chunked(20) else emptyList() }
+        derivedStateOf {
+            if (apps.size > 12) apps.drop(12).chunked(20) else emptyList()
+        }
     }
     val totalPages = 2 + extraPages.size
+
     val pagerState = rememberPagerState(initialPage = 1, pageCount = { totalPages })
 
+    // Tutup keyboard otomatis jika keluar dari halaman Search (Page 0)
     LaunchedEffect(pagerState.currentPage) {
-        if (pagerState.currentPage != 0) focusManager.clearFocus()
+        if (pagerState.currentPage != 0) {
+            focusManager.clearFocus()
+        }
     }
-
-    // Animasi Dynamic Island Ringan & Cepat
-    val springSpec = spring<Float>(dampingRatio = 0.75f, stiffness = Spring.StiffnessMedium)
-    val targetWidth = when (islandMode) {
-        IslandMode.IDLE -> 110f
-        IslandMode.CHARGING -> 265f
-        IslandMode.MUSIC_COMPACT -> 180f
-        IslandMode.MUSIC_EXPANDED -> 320f
-        IslandMode.RECORDING_COMPACT -> 180f
-        IslandMode.RECORDING_EXPANDED -> 330f
-    }
-    val animatedWidth by animateFloatAsState(targetValue = targetWidth, animationSpec = springSpec, label = "w")
-
-    val targetHeight = when (islandMode) {
-        IslandMode.IDLE -> 32f
-        IslandMode.CHARGING -> 46f
-        IslandMode.MUSIC_COMPACT -> 38f
-        IslandMode.MUSIC_EXPANDED -> 84f
-        IslandMode.RECORDING_COMPACT -> 38f
-        IslandMode.RECORDING_EXPANDED -> 88f
-    }
-    val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
-
-    val infiniteTransition = rememberInfiniteTransition(label = "eq")
-    val wave1 by infiniteTransition.animateFloat(8f, 22f, infiniteRepeatable(tween(280), RepeatMode.Reverse), label = "")
-    val wave2 by infiniteTransition.animateFloat(22f, 9f, infiniteRepeatable(tween(400), RepeatMode.Reverse), label = "")
-    val wave3 by infiniteTransition.animateFloat(11f, 26f, infiniteRepeatable(tween(340), RepeatMode.Reverse), label = "")
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0A1128))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFF0A1128).copy(alpha = 0.38f),
+                        Color(0xFF1C2541).copy(alpha = 0.62f),
+                        Color(0xFF0B132B).copy(alpha = 0.78f)
+                    )
+                )
+            )
             .navigationBarsPadding()
     ) {
+        // LAYER 1: KONTEN UTAMA YANG DAPAT DIGESER (HORIZONTAL PAGER)
         Column(
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(6.dp))
+            // Spacer pembatas atas agar Dynamic Bar yang melayang tidak menabrak widget
+            Spacer(modifier = Modifier.statusBarsPadding().height(48.dp))
 
-            // 1. DYNAMIC ISLAND INTERAKTIF MUSIK & REKAM
-            Box(
-                modifier = Modifier
-                    .width(animatedWidth.dp)
-                    .height(animatedHeight.dp)
-                    .clip(RoundedCornerShape(42.dp))
-                    .background(Color.Black)
-                    .border(0.7.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(42.dp))
-                    .combinedClickable(
-                        onClick = {
-                            triggerHaptic(context)
-                            islandMode = when (islandMode) {
-                                IslandMode.MUSIC_COMPACT -> IslandMode.MUSIC_EXPANDED
-                                IslandMode.MUSIC_EXPANDED -> IslandMode.MUSIC_COMPACT
-                                IslandMode.RECORDING_COMPACT -> IslandMode.RECORDING_EXPANDED
-                                IslandMode.RECORDING_EXPANDED -> IslandMode.RECORDING_COMPACT
-                                IslandMode.IDLE -> IslandMode.MUSIC_COMPACT // Klik saat idle simulasi musik
-                                else -> IslandMode.IDLE
-                            }
-                        },
-                        onLongClick = {
-                            triggerHaptic(context)
-                            islandMode = if (islandMode == IslandMode.RECORDING_COMPACT) IslandMode.IDLE else IslandMode.RECORDING_COMPACT
-                        }
-                    )
-                    .padding(horizontal = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                AnimatedContent(
-                    targetState = islandMode,
-                    transitionSpec = { fadeIn(tween(100)) togetherWith fadeOut(tween(60)) },
-                    label = "island"
-                ) { mode ->
-                    when (mode) {
-                        IslandMode.IDLE -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101012)))
-                                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (isCharging) Color(0xFF30D158) else Color(0xFF18181A)))
-                            }
-                        }
-                        IslandMode.CHARGING -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("⚡", fontSize = 15.sp)
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Mengisi Daya", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                                Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                        IslandMode.MUSIC_COMPACT -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("🎵", fontSize = 12.sp)
-                                Text("Audio Pemutar", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                                Row(horizontalArrangement = Arrangement.spacedBy(2.5.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    listOf(wave1, wave2, wave3).forEach { h ->
-                                        Box(modifier = Modifier.width(2.5.dp).height(h.dp).clip(RoundedCornerShape(1.dp)).background(Color(0xFF30D158)))
-                                    }
-                                }
-                            }
-                        }
-                        IslandMode.MUSIC_EXPANDED -> {
-                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("🎧 Sedang Memutar Musik", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                    Button(
-                                        onClick = { isPlayingMusic = !isPlayingMusic },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF30D158)),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(if (isPlayingMusic) "Pause" else "Play", fontSize = 11.sp, color = Color.Black)
-                                    }
-                                }
-                            }
-                        }
-                        IslandMode.RECORDING_COMPACT -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF453A)))
-                                Text(
-                                    String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
-                                    color = Color(0xFFFF453A),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(2.5.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    listOf(wave1, wave2, wave3, wave1).forEach { h ->
-                                        Box(modifier = Modifier.width(2.5.dp).height(h.dp).clip(RoundedCornerShape(1.dp)).background(Color(0xFFFF9F0A)))
-                                    }
-                                }
-                            }
-                        }
-                        IslandMode.RECORDING_EXPANDED -> {
-                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF453A)))
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text("Memo Suara", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                    }
-                                    Text(
-                                        String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
-                                        color = Color(0xFFFF453A),
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                    Button(
-                                        onClick = { islandMode = IslandMode.IDLE },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF453A)),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("Berhenti", fontSize = 11.sp, color = Color.White)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 2. HORIZONTAL PAGER (120HZ SMOOTH SWIPE)
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier
@@ -468,18 +298,24 @@ fun IOS27LauncherScreen() {
                                 .padding(horizontal = 18.dp),
                             verticalArrangement = Arrangement.spacedBy(18.dp)
                         ) {
+                            // Baris Widget Atas
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(142.dp),
                                 horizontalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
+                                // Widget Cuaca
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxHeight()
                                         .clip(RoundedCornerShape(26.dp))
-                                        .background(Color(0xFF1D6FA3))
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(Color(0xFF1D6FA3).copy(alpha = 0.84f), Color(0xFF0F3460).copy(alpha = 0.84f))
+                                            )
+                                        )
                                         .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(26.dp))
                                         .padding(16.dp)
                                 ) {
@@ -500,6 +336,7 @@ fun IOS27LauncherScreen() {
                                     }
                                 }
 
+                                // Widget Baterai
                                 val batteryColor = when {
                                     isCharging -> Color(0xFF30D158)
                                     batteryPct <= 20 -> Color(0xFFFF453A)
@@ -553,7 +390,7 @@ fun IOS27LauncherScreen() {
                                             )
                                         }
                                         Text(
-                                            if (isCharging) "Pengisian daya aktif" else "Kapasitas baterai saat ini",
+                                            if (isCharging) "Pengisian daya aktif" else "Kapasitas daya saat ini",
                                             color = Color.White.copy(alpha = 0.78f),
                                             fontSize = 11.sp,
                                             lineHeight = 14.sp
@@ -562,6 +399,7 @@ fun IOS27LauncherScreen() {
                                 }
                             }
 
+                            // 3 Baris x 4 Kolom Aplikasi di Halaman 1
                             StaticAppPageGrid(
                                 pageApps = firstPageApps,
                                 onLaunchApp = { pkg -> launchApp(context, pkg) },
@@ -594,123 +432,686 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // 3. PAGE INDICATOR DOTS
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.Black.copy(alpha = 0.22f))
-                    .padding(horizontal = 12.dp, vertical = 5.dp)
-            ) {
-                for (i in 0 until totalPages) {
-                    val isSelected = pagerState.currentPage == i
-                    Box(
-                        modifier = Modifier
-                            .size(if (i == 0) 8.dp else 7.dp)
-                            .clip(CircleShape)
-                            .background(
-                                when {
-                                    isSelected -> Color.White
-                                    i == 0 -> Color(0xFF64D2FF).copy(alpha = 0.55f)
-                                    else -> Color.White.copy(alpha = 0.32f)
-                                }
-                            )
-                            .clickable {
-                                coroutineScope.launch { pagerState.animateScrollToPage(i) }
-                            }
-                    )
+            // Indikator Titik Halaman ala iOS
+            PageIndicator(
+                currentPage = pagerState.currentPage,
+                totalPages = totalPages,
+                onPageSelected = { i ->
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(i)
+                    }
                 }
-            }
+            )
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 4. GLASS DOCK
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp)
-                    .height(90.dp)
-                    .padding(bottom = 8.dp)
-                    .clip(RoundedCornerShape(34.dp))
-                    .background(Color.White.copy(alpha = 0.18f))
-                    .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(34.dp))
-                    .padding(horizontal = 18.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    apps.take(4).forEach { dockApp ->
-                        Box(
-                            modifier = Modifier
-                                .size(58.dp)
-                                .clip(RoundedCornerShape(15.dp))
-                                .background(Color.White.copy(alpha = 0.2f))
-                                .clickable { launchApp(context, dockApp.packageName) }
-                                .padding(5.dp)
-                        ) {
-                            Image(
-                                bitmap = dockApp.icon,
-                                contentDescription = dockApp.label,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(12.dp))
-                            )
-                        }
-                    }
-                }
-            }
+            // Glass Dock Bawah
+            GlassDock(
+                dockApps = apps.take(4),
+                onLaunchApp = { pkg -> launchApp(context, pkg) }
+            )
         }
 
+        // LAYER 2: PERSISTENT FLOATING DYNAMIC ISLAND (SELALU ADA DI ATAS PADA SEMUA HALAMAN MENU)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(top = 4.dp)
+                .zIndex(10f),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            DynamicIslandBar(
+                batteryPct = batteryPct,
+                isCharging = isCharging
+            )
+        }
+
+        // Context Menu saat ikon ditekan lama
         selectedAppMenu?.let { app ->
-            AlertDialog(
-                onDismissRequest = { selectedAppMenu = null },
-                containerColor = Color(0xFF1C1C1E).copy(alpha = 0.95f),
-                titleContentColor = Color.White,
-                textContentColor = Color.White.copy(alpha = 0.8f),
-                title = { Text(app.label, fontWeight = FontWeight.Bold) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Paket: ${app.packageName}", fontSize = 12.sp)
-                        Text(
-                            "📱 Buka Aplikasi",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    launchApp(context, app.packageName)
-                                    selectedAppMenu = null
-                                }
-                                .padding(vertical = 6.dp)
-                        )
-                        Text(
-                            "⚙️ Info Aplikasi Sistem",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                        data = android.net.Uri.parse("package:${app.packageName}")
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(intent)
-                                    selectedAppMenu = null
-                                }
-                                .padding(vertical = 6.dp)
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { selectedAppMenu = null }) {
-                        Text("Tutup", color = Color(0xFF0A84FF))
-                    }
-                }
+            AppContextMenu(
+                app = app,
+                onDismiss = { selectedAppMenu = null },
+                onLaunch = { launchApp(context, app.packageName) }
             )
         }
     }
 }
 
+// ==========================================
+// DYNAMIC ISLAND BAR (ISOLATED ZERO-LAG SCOPE)
+// ==========================================
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun DynamicIslandBar(
+    batteryPct: Int,
+    isCharging: Boolean
+) {
+    val context = LocalContext.current
+    var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
+
+    // State Musik Terisolasi (Tidak memicu recomposition di luar Dynamic Island)
+    var isPlaying by remember { mutableStateOf(false) }
+    var currentTrackIndex by remember { mutableIntStateOf(0) }
+    var trackProgressSeconds by remember { mutableIntStateOf(45) }
+    val currentTrack = samplePlaylist[currentTrackIndex % samplePlaylist.size]
+
+    // State Perekam Suara Terisolasi
+    var recordSeconds by remember { mutableIntStateOf(0) }
+
+    // State Alarm Terisolasi
+    var alarmSeconds by remember { mutableIntStateOf(45) }
+
+    // Otomatis Aktifkan Animasi Charger Saat Dicolok
+    LaunchedEffect(isCharging) {
+        if (isCharging) {
+            triggerHaptic(context)
+            val prev = islandMode
+            islandMode = IslandMode.CHARGING
+            delay(3500)
+            if (islandMode == IslandMode.CHARGING) {
+                islandMode = if (isPlaying) IslandMode.MUSIC_COMPACT else prev.takeIf { it != IslandMode.CHARGING } ?: IslandMode.IDLE
+            }
+        }
+    }
+
+    // Timer Putar Musik (Hanya berdetik jika sedang playing)
+    LaunchedEffect(isPlaying, currentTrackIndex) {
+        while (isPlaying) {
+            delay(1000)
+            trackProgressSeconds++
+            if (trackProgressSeconds >= currentTrack.durationSeconds) {
+                currentTrackIndex = (currentTrackIndex + 1) % samplePlaylist.size
+                trackProgressSeconds = 0
+            }
+        }
+    }
+
+    // Timer Rekaman
+    LaunchedEffect(islandMode) {
+        if (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
+            while (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
+                delay(1000)
+                recordSeconds++
+            }
+        } else {
+            recordSeconds = 0
+        }
+    }
+
+    // Timer Alarm
+    LaunchedEffect(islandMode) {
+        if (islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) {
+            while ((islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) && alarmSeconds > 0) {
+                delay(1000)
+                alarmSeconds--
+            }
+            if (alarmSeconds <= 0) {
+                triggerHaptic(context)
+                islandMode = if (isPlaying) IslandMode.MUSIC_COMPACT else IslandMode.IDLE
+            }
+        }
+    }
+
+    // Animasi Pegas Dynamic Island yang Halus (Smooth Spring Curve)
+    val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
+
+    val targetWidth = when (islandMode) {
+        IslandMode.IDLE -> 112f
+        IslandMode.CHARGING -> 268f
+        IslandMode.MUSIC_COMPACT -> 200f
+        IslandMode.MUSIC_EXPANDED -> 342f
+        IslandMode.RECORDING_COMPACT -> 180f
+        IslandMode.RECORDING_EXPANDED -> 330f
+        IslandMode.ALARM_COMPACT -> 175f
+        IslandMode.ALARM_EXPANDED -> 320f
+    }
+    val animatedWidth by animateFloatAsState(targetValue = targetWidth, animationSpec = springSpec, label = "w")
+
+    val targetHeight = when (islandMode) {
+        IslandMode.IDLE -> 33f
+        IslandMode.CHARGING -> 46f
+        IslandMode.MUSIC_COMPACT -> 36f
+        IslandMode.MUSIC_EXPANDED -> 182f
+        IslandMode.RECORDING_COMPACT -> 38f
+        IslandMode.RECORDING_EXPANDED -> 88f
+        IslandMode.ALARM_COMPACT -> 38f
+        IslandMode.ALARM_EXPANDED -> 86f
+    }
+    val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
+
+    // Kontainer Dynamic Island Melayang
+    Box(
+        modifier = Modifier
+            .width(animatedWidth.dp)
+            .height(animatedHeight.dp)
+            .clip(RoundedCornerShape(if (islandMode == IslandMode.MUSIC_EXPANDED) 38.dp else 42.dp))
+            .background(Color.Black)
+            .border(
+                0.7.dp,
+                Color.White.copy(alpha = 0.22f),
+                RoundedCornerShape(if (islandMode == IslandMode.MUSIC_EXPANDED) 38.dp else 42.dp)
+            )
+            .combinedClickable(
+                onClick = {
+                    triggerHaptic(context)
+                    islandMode = when (islandMode) {
+                        IslandMode.IDLE -> {
+                            // Saat di-tap di mode Idle, langsung aktifkan Dynamic Music Player
+                            isPlaying = true
+                            IslandMode.MUSIC_EXPANDED
+                        }
+                        IslandMode.CHARGING -> {
+                            if (isPlaying) IslandMode.MUSIC_COMPACT else IslandMode.IDLE
+                        }
+                        IslandMode.MUSIC_COMPACT -> IslandMode.MUSIC_EXPANDED
+                        IslandMode.MUSIC_EXPANDED -> IslandMode.MUSIC_COMPACT
+                        IslandMode.RECORDING_COMPACT -> IslandMode.RECORDING_EXPANDED
+                        IslandMode.RECORDING_EXPANDED -> IslandMode.RECORDING_COMPACT
+                        IslandMode.ALARM_COMPACT -> IslandMode.ALARM_EXPANDED
+                        IslandMode.ALARM_EXPANDED -> IslandMode.ALARM_COMPACT
+                    }
+                },
+                onLongClick = {
+                    triggerHaptic(context)
+                    // Tekan lama untuk ganti mode (Music -> Recorder -> Alarm -> Idle)
+                    islandMode = when (islandMode) {
+                        IslandMode.IDLE -> {
+                            isPlaying = true
+                            IslandMode.MUSIC_COMPACT
+                        }
+                        IslandMode.MUSIC_COMPACT, IslandMode.MUSIC_EXPANDED -> {
+                            IslandMode.RECORDING_COMPACT
+                        }
+                        IslandMode.RECORDING_COMPACT, IslandMode.RECORDING_EXPANDED -> {
+                            alarmSeconds = 45
+                            IslandMode.ALARM_COMPACT
+                        }
+                        IslandMode.ALARM_COMPACT, IslandMode.ALARM_EXPANDED -> {
+                            IslandMode.IDLE
+                        }
+                        else -> IslandMode.IDLE
+                    }
+                }
+            )
+            .padding(horizontal = if (islandMode == IslandMode.MUSIC_EXPANDED) 16.dp else 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        AnimatedContent(
+            targetState = islandMode,
+            transitionSpec = {
+                (fadeIn(tween(170, delayMillis = 40)) + scaleIn(initialScale = 0.94f))
+                    .togetherWith(fadeOut(tween(110)) + scaleOut(targetScale = 0.94f))
+            },
+            label = "islandContent"
+        ) { mode ->
+            when (mode) {
+                IslandMode.IDLE -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101014)))
+                        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (isCharging) Color(0xFF30D158) else Color(0xFF18181E)))
+                    }
+                }
+
+                IslandMode.CHARGING -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("⚡", fontSize = 15.sp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Mengisi Daya", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                IslandMode.MUSIC_COMPACT -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Kiri: Mini Spinning Vinyl / Artwork
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(currentTrack.themeColor),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("🎵", fontSize = 10.sp)
+                            }
+                            Spacer(modifier = Modifier.width(7.dp))
+                            Text(
+                                text = currentTrack.title,
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 95.dp)
+                            )
+                        }
+
+                        // Kanan: Mini Equalizer Berdenyut 60 FPS di Canvas
+                        MiniEqualizer(
+                            isPlaying = isPlaying,
+                            barColor = currentTrack.themeColor,
+                            modifier = Modifier.size(width = 22.dp, height = 15.dp)
+                        )
+                    }
+                }
+
+                IslandMode.MUSIC_EXPANDED -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        verticalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        // Header Baris 1: Cover Album + Info Lagu + Waveform
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Cover Album Rounded
+                            Box(
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(currentTrack.themeColor, Color(0xFF1C1C1E))
+                                        )
+                                    )
+                                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("🎶", fontSize = 24.sp)
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = currentTrack.title,
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = currentTrack.artist,
+                                    color = Color.White.copy(alpha = 0.72f),
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            // Dynamic Live Waveform di Kanan
+                            ExpandedWaveformVisualizer(
+                                isPlaying = isPlaying,
+                                barColor = currentTrack.themeColor,
+                                modifier = Modifier.size(width = 44.dp, height = 24.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Timeline & Progress Bar
+                        val progressRatio = (trackProgressSeconds.toFloat() / currentTrack.durationSeconds.toFloat()).coerceIn(0f, 1f)
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(Color.White.copy(alpha = 0.22f))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(progressRatio)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(Color.White)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = String.format("%02d:%02d", trackProgressSeconds / 60, trackProgressSeconds % 60),
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    fontSize = 10.sp
+                                )
+                                val remaining = (currentTrack.durationSeconds - trackProgressSeconds).coerceAtLeast(0)
+                                Text(
+                                    text = String.format("-%02d:%02d", remaining / 60, remaining % 60),
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Baris 3: Kontrol Pemutar Musik (Prev, Play/Pause, Next)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Tombol Kecilkan
+                            IconButton(
+                                onClick = { islandMode = IslandMode.MUSIC_COMPACT },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Text("▾", color = Color.White.copy(alpha = 0.7f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            // Previous Track
+                            IconButton(
+                                onClick = {
+                                    triggerHaptic(context)
+                                    if (trackProgressSeconds > 3) {
+                                        trackProgressSeconds = 0
+                                    } else {
+                                        currentTrackIndex = if (currentTrackIndex > 0) currentTrackIndex - 1 else samplePlaylist.size - 1
+                                        trackProgressSeconds = 0
+                                    }
+                                    isPlaying = true
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Text("⏮", color = Color.White, fontSize = 18.sp)
+                            }
+
+                            // Play / Pause Circle
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .clickable {
+                                        triggerHaptic(context)
+                                        isPlaying = !isPlaying
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (isPlaying) "⏸" else "▶",
+                                    color = Color.Black,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            // Next Track
+                            IconButton(
+                                onClick = {
+                                    triggerHaptic(context)
+                                    currentTrackIndex = (currentTrackIndex + 1) % samplePlaylist.size
+                                    trackProgressSeconds = 0
+                                    isPlaying = true
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Text("⏭", color = Color.White, fontSize = 18.sp)
+                            }
+
+                            // Stop / Tutup
+                            IconButton(
+                                onClick = {
+                                    triggerHaptic(context)
+                                    isPlaying = false
+                                    islandMode = IslandMode.IDLE
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Text("✕", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+                            }
+                        }
+                    }
+                }
+
+                IslandMode.RECORDING_COMPACT -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF453A)))
+                        Text(
+                            String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
+                            color = Color(0xFFFF453A),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        MiniEqualizer(
+                            isPlaying = true,
+                            barColor = Color(0xFFFF9F0A),
+                            modifier = Modifier.size(width = 20.dp, height = 14.dp)
+                        )
+                    }
+                }
+
+                IslandMode.RECORDING_EXPANDED -> {
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF453A)))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Memo Suara", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            Text(
+                                String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
+                                color = Color(0xFFFF453A),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            ExpandedWaveformVisualizer(
+                                isPlaying = true,
+                                barColor = Color(0xFFFF9F0A),
+                                modifier = Modifier.size(width = 80.dp, height = 22.dp)
+                            )
+                            Button(
+                                onClick = { islandMode = IslandMode.IDLE },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF453A)),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
+                            ) {
+                                Text("Berhenti", fontSize = 11.sp, color = Color.White)
+                            }
+                        }
+                    }
+                }
+
+                IslandMode.ALARM_COMPACT -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("🔔", fontSize = 12.sp)
+                        Text(String.format("%02ds", alarmSeconds), color = Color(0xFFFF9F0A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                IslandMode.ALARM_EXPANDED -> {
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("⏰", fontSize = 14.sp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Alarm Berjalan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            Text(String.format("%02ds lagi", alarmSeconds), color = Color(0xFFFF9F0A), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Button(
+                                onClick = { islandMode = IslandMode.IDLE },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
+                            ) {
+                                Text("Matikan", fontSize = 11.sp, color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================
+// HARDWARE-ACCELERATED EQUALIZER & VISUALIZER
+// ==========================================
+@Composable
+fun MiniEqualizer(
+    isPlaying: Boolean,
+    barColor: Color,
+    modifier: Modifier = Modifier
+) {
+    if (!isPlaying) {
+        // Gambar batang diam statis tanpa menghabiskan siklus CPU/GPU
+        Canvas(modifier = modifier) {
+            val barW = 2.5.dp.toPx()
+            val spacing = 2.dp.toPx()
+            val staticRatios = listOf(0.4f, 0.7f, 0.5f, 0.3f)
+            staticRatios.forEachIndexed { i, r ->
+                val x = i * (barW + spacing)
+                val h = size.height * r
+                val y = (size.height - h) / 2
+                drawRoundRect(
+                    color = barColor.copy(alpha = 0.5f),
+                    topLeft = Offset(x, y),
+                    size = Size(barW, h),
+                    cornerRadius = CornerRadius(barW / 2, barW / 2)
+                )
+            }
+        }
+        return
+    }
+
+    // Animasi batang aktif hanya berjalan saat status playing
+    val transition = rememberInfiniteTransition(label = "miniEq")
+    val b1 by transition.animateFloat(
+        initialValue = 0.25f, targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(tween(260, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "1"
+    )
+    val b2 by transition.animateFloat(
+        initialValue = 0.85f, targetValue = 0.30f,
+        animationSpec = infiniteRepeatable(tween(340, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "2"
+    )
+    val b3 by transition.animateFloat(
+        initialValue = 0.35f, targetValue = 1.00f,
+        animationSpec = infiniteRepeatable(tween(300, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "3"
+    )
+    val b4 by transition.animateFloat(
+        initialValue = 0.90f, targetValue = 0.20f,
+        animationSpec = infiniteRepeatable(tween(380, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "4"
+    )
+
+    Canvas(modifier = modifier) {
+        val barW = 2.5.dp.toPx()
+        val spacing = 2.dp.toPx()
+        val bars = listOf(b1, b2, b3, b4)
+        bars.forEachIndexed { i, factor ->
+            val x = i * (barW + spacing)
+            val h = size.height * factor
+            val y = (size.height - h) / 2
+            drawRoundRect(
+                color = barColor,
+                topLeft = Offset(x, y),
+                size = Size(barW, h),
+                cornerRadius = CornerRadius(barW / 2, barW / 2)
+            )
+        }
+    }
+}
+
+@Composable
+fun ExpandedWaveformVisualizer(
+    isPlaying: Boolean,
+    barColor: Color,
+    modifier: Modifier = Modifier
+) {
+    if (!isPlaying) {
+        Canvas(modifier = modifier) {
+            val barW = 3.dp.toPx()
+            val spacing = 3.dp.toPx()
+            val ratios = listOf(0.3f, 0.5f, 0.4f, 0.6f, 0.3f, 0.5f)
+            ratios.forEachIndexed { i, r ->
+                val x = i * (barW + spacing)
+                val h = size.height * r
+                val y = (size.height - h) / 2
+                drawRoundRect(
+                    color = barColor.copy(alpha = 0.4f),
+                    topLeft = Offset(x, y),
+                    size = Size(barW, h),
+                    cornerRadius = CornerRadius(barW / 2, barW / 2)
+                )
+            }
+        }
+        return
+    }
+
+    val transition = rememberInfiniteTransition(label = "expWave")
+    val w1 by transition.animateFloat(0.2f, 0.9f, infiniteRepeatable(tween(280), RepeatMode.Reverse), label = "")
+    val w2 by transition.animateFloat(0.9f, 0.3f, infiniteRepeatable(tween(400), RepeatMode.Reverse), label = "")
+    val w3 by transition.animateFloat(0.4f, 1.0f, infiniteRepeatable(tween(320), RepeatMode.Reverse), label = "")
+    val w4 by transition.animateFloat(0.8f, 0.2f, infiniteRepeatable(tween(360), RepeatMode.Reverse), label = "")
+    val w5 by transition.animateFloat(0.3f, 0.85f, infiniteRepeatable(tween(290), RepeatMode.Reverse), label = "")
+    val w6 by transition.animateFloat(0.7f, 0.4f, infiniteRepeatable(tween(370), RepeatMode.Reverse), label = "")
+
+    Canvas(modifier = modifier) {
+        val barW = 3.dp.toPx()
+        val spacing = 3.dp.toPx()
+        val bars = listOf(w1, w2, w3, w4, w5, w6)
+        bars.forEachIndexed { i, factor ->
+            val x = i * (barW + spacing)
+            val h = size.height * factor
+            val y = (size.height - h) / 2
+            drawRoundRect(
+                color = barColor,
+                topLeft = Offset(x, y),
+                size = Size(barW, h),
+                cornerRadius = CornerRadius(barW / 2, barW / 2)
+            )
+        }
+    }
+}
+
+// ==========================================
+// GRID APLIKASI STATIS TEROPTIMASI
+// ==========================================
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StaticAppPageGrid(
@@ -731,42 +1132,12 @@ fun StaticAppPageGrid(
                 for (i in 0 until 4) {
                     val app = rowApps.getOrNull(i)
                     if (app != null) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier
-                                .weight(1f)
-                                .combinedClickable(
-                                    onClick = { onLaunchApp(app.packageName) },
-                                    onLongClick = { onLongClickApp(app) }
-                                )
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(60.dp)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(Color.White.copy(alpha = 0.18f))
-                                    .border(0.8.dp, Color.White.copy(alpha = 0.32f), RoundedCornerShape(16.dp))
-                                    .padding(5.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Image(
-                                    bitmap = app.icon,
-                                    contentDescription = app.label,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clip(RoundedCornerShape(12.dp))
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(5.dp))
-                            Text(
-                                text = app.label,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center
-                            )
-                        }
+                        AppItemCell(
+                            app = app,
+                            modifier = Modifier.weight(1f),
+                            onLaunchApp = onLaunchApp,
+                            onLongClickApp = onLongClickApp
+                        )
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
                     }
@@ -776,6 +1147,136 @@ fun StaticAppPageGrid(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun AppItemCell(
+    app: AppModel,
+    modifier: Modifier = Modifier,
+    onLaunchApp: (String) -> Unit,
+    onLongClickApp: (AppModel) -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier.combinedClickable(
+            onClick = { onLaunchApp(app.packageName) },
+            onLongClick = { onLongClickApp(app) }
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .size(60.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color.White.copy(alpha = 0.18f))
+                .border(0.8.dp, Color.White.copy(alpha = 0.32f), RoundedCornerShape(16.dp))
+                .padding(5.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                bitmap = app.icon,
+                contentDescription = app.label,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(12.dp))
+            )
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(
+            text = app.label,
+            color = Color.White,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+// ==========================================
+// INDIKATOR HALAMAN (DOTS) ALA iOS
+// ==========================================
+@Composable
+fun PageIndicator(
+    currentPage: Int,
+    totalPages: Int,
+    onPageSelected: (Int) -> Unit
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black.copy(alpha = 0.22f))
+            .padding(horizontal = 12.dp, vertical = 5.dp)
+    ) {
+        for (i in 0 until totalPages) {
+            val isSelected = currentPage == i
+            Box(
+                modifier = Modifier
+                    .size(if (i == 0) 8.dp else 7.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            isSelected -> Color.White
+                            i == 0 -> Color(0xFF64D2FF).copy(alpha = 0.65f)
+                            else -> Color.White.copy(alpha = 0.32f)
+                        }
+                    )
+                    .clickable { onPageSelected(i) }
+            )
+        }
+    }
+}
+
+// ==========================================
+// GLASS DOCK BAWAH
+// ==========================================
+@Composable
+fun GlassDock(
+    dockApps: List<AppModel>,
+    onLaunchApp: (String) -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp)
+            .height(90.dp)
+            .padding(bottom = 8.dp)
+            .clip(RoundedCornerShape(34.dp))
+            .background(Color.White.copy(alpha = 0.18f))
+            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(34.dp))
+            .padding(horizontal = 18.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            dockApps.forEach { dockApp ->
+                Box(
+                    modifier = Modifier
+                        .size(58.dp)
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(Color.White.copy(alpha = 0.2f))
+                        .clickable { onLaunchApp(dockApp.packageName) }
+                        .padding(5.dp)
+                ) {
+                    Image(
+                        bitmap = dockApp.icon,
+                        contentDescription = dockApp.label,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(12.dp))
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ==========================================
+// HALAMAN SPOTLIGHT SEARCH & APP LIBRARY
+// ==========================================
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LeftSearchPage(
@@ -833,43 +1334,67 @@ fun LeftSearchPage(
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(filtered, key = { it.packageName }) { app ->
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.combinedClickable(
-                        onClick = { onLaunchApp(app.packageName) },
-                        onLongClick = { onLongClickApp(app) }
-                    )
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(58.dp)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(Color.White.copy(alpha = 0.18f))
-                            .border(0.8.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(15.dp))
-                            .padding(5.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Image(
-                            bitmap = app.icon,
-                            contentDescription = app.label,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(RoundedCornerShape(11.dp))
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(5.dp))
-                    Text(
-                        text = app.label,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
-                    )
-                }
+                AppItemCell(
+                    app = app,
+                    onLaunchApp = onLaunchApp,
+                    onLongClickApp = onLongClickApp
+                )
             }
         }
     }
+}
+
+// ==========================================
+// CONTEXT MENU (LONG PRESS APP)
+// ==========================================
+@Composable
+fun AppContextMenu(
+    app: AppModel,
+    onDismiss: () -> Unit,
+    onLaunch: () -> Unit
+) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF1C1C1E).copy(alpha = 0.95f),
+        titleContentColor = Color.White,
+        textContentColor = Color.White.copy(alpha = 0.8f),
+        title = { Text(app.label, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Paket: ${app.packageName}", fontSize = 12.sp)
+                Text(
+                    "📱 Buka Aplikasi",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onLaunch()
+                            onDismiss()
+                        }
+                        .padding(vertical = 6.dp)
+                )
+                Text(
+                    "⚙️ Info Aplikasi Sistem",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = android.net.Uri.parse("package:${app.packageName}")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                            onDismiss()
+                        }
+                        .padding(vertical = 6.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Tutup", color = Color(0xFF0A84FF))
+            }
+        }
+    )
 }
 
 fun launchApp(context: Context, packageName: String) {
