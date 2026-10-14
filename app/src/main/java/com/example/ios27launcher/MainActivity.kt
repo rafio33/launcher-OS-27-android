@@ -16,10 +16,8 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -66,6 +64,16 @@ data class WeatherData(
     val low: Int = 25
 )
 
+// Enum status fungsi resmi Dynamic Island
+enum class IslandMode {
+    IDLE,
+    CHARGING,
+    RECORDING_COMPACT,
+    RECORDING_EXPANDED,
+    ALARM_COMPACT,
+    ALARM_EXPANDED
+}
+
 fun drawableToBitmap(drawable: Drawable): ImageBitmap {
     val bmp = Bitmap.createBitmap(140, 140, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bmp)
@@ -78,16 +86,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1. Buat Layout Menembus sampai ke Ujung Atas Layar (Edge-to-Edge)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        // 2. Pastikan Area Kamera (Cutout) Tidak Diblok Hitam oleh Sistem
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
 
-        // 3. Buat Status Bar (Tempat WiFi, Jam, Sinyal) 100% Transparan Menyatu Wallpaper
         window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
         window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
@@ -97,7 +101,6 @@ class MainActivity : ComponentActivity() {
             window.isNavigationBarContrastEnforced = false
         }
 
-        // Pastikan ikon WiFi, Jam, dan Sinyal berwarna Putih terang
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.isAppearanceLightStatusBars = false
         controller.isAppearanceLightNavigationBars = false
@@ -119,21 +122,21 @@ fun IOS27LauncherScreen() {
     var apps by remember { mutableStateOf<List<AppModel>>(emptyList()) }
     var searchQuery by remember { mutableStateOf("") }
     var showSpotlight by remember { mutableStateOf(false) }
-    var iconMode by remember { mutableStateOf(0) }
     var selectedAppMenu by remember { mutableStateOf<AppModel?>(null) }
 
-    // State Baterai Asli (Real-Time)
+    // State Baterai Real-Time
     var batteryPct by remember { mutableStateOf(100) }
     var isCharging by remember { mutableStateOf(false) }
 
-    // State Dynamic Island: 0 = Idle Kamera, 1 = Animasi Cas, 2 = Rekam Suara, 3 = Menu Tema
-    var islandState by remember { mutableStateOf(0) }
+    // State Fungsional Dynamic Island
+    var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
     var recordSeconds by remember { mutableStateOf(0) }
+    var alarmSeconds by remember { mutableStateOf(45) }
 
-    // State Cuaca Asli (Real-Time)
+    // State Cuaca Real-Time
     var weather by remember { mutableStateOf(WeatherData()) }
 
-    // Sensor Baterai & Cas Real-time
+    // Broadcast Baterai
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -147,53 +150,62 @@ fun IOS27LauncherScreen() {
                 val nowCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                         status == BatteryManager.BATTERY_STATUS_FULL
 
+                // Otomatis memicu animasi cas saat kabel dicolok
                 if (nowCharging && !isCharging) {
                     triggerHaptic(context)
-                    islandState = 1
+                    islandMode = IslandMode.CHARGING
                 }
                 isCharging = nowCharging
             }
         }
         context.registerReceiver(receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        onDispose {
-            context.unregisterReceiver(receiver)
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+
+    // Auto-shrink saat cas selesai ditampilkan (3 detik)
+    LaunchedEffect(islandMode) {
+        if (islandMode == IslandMode.CHARGING) {
+            delay(3000)
+            if (islandMode == IslandMode.CHARGING) islandMode = IslandMode.IDLE
         }
     }
 
-    // Otomatis mengecilkan Dynamic Island 3.5 detik setelah animasi cas muncul
-    LaunchedEffect(islandState) {
-        if (islandState == 1) {
-            delay(3500)
-            if (islandState == 1) islandState = 0
-        }
-    }
-
-    // Penghitung waktu saat mode perekam suara aktif
-    LaunchedEffect(islandState) {
-        if (islandState == 2) {
-            recordSeconds = 0
-            while (islandState == 2) {
+    // Timer Rekam Suara
+    LaunchedEffect(islandMode) {
+        if (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
+            while (islandMode == IslandMode.RECORDING_COMPACT || islandMode == IslandMode.RECORDING_EXPANDED) {
                 delay(1000)
                 recordSeconds++
             }
+        } else {
+            recordSeconds = 0
         }
     }
 
-    // Ambil Data Cuaca Asli dari Open-Meteo
+    // Timer Alarm Mundur
+    LaunchedEffect(islandMode) {
+        if (islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) {
+            while ((islandMode == IslandMode.ALARM_COMPACT || islandMode == IslandMode.ALARM_EXPANDED) && alarmSeconds > 0) {
+                delay(1000)
+                alarmSeconds--
+            }
+            if (alarmSeconds <= 0) islandMode = IslandMode.IDLE
+        }
+    }
+
+    // Ambil Cuaca Real
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
                 val url = URL("https://api.open-meteo.com/v1/forecast?latitude=-6.2088&longitude=106.8456&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.connectTimeout = 5000
-                conn.readTimeout = 5000
                 if (conn.responseCode == 200) {
-                    val response = conn.inputStream.bufferedReader().readText()
-                    val json = JSONObject(response)
+                    val res = conn.inputStream.bufferedReader().readText()
+                    val json = JSONObject(res)
                     val current = json.getJSONObject("current")
                     val temp = current.getDouble("temperature_2m").toInt()
                     val code = current.getInt("weather_code")
-
                     val daily = json.getJSONObject("daily")
                     val maxArr = daily.getJSONArray("temperature_2m_max")
                     val minArr = daily.getJSONArray("temperature_2m_min")
@@ -217,24 +229,17 @@ fun IOS27LauncherScreen() {
         }
     }
 
-    // Muat Daftar Aplikasi di HP
+    // Ambil Aplikasi Terinstal
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val pm = context.packageManager
-            val intent = Intent(Intent.ACTION_MAIN, null).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-            }
+            val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
             val resolveInfos = pm.queryIntentActivities(intent, 0)
-            val loadedApps = resolveInfos.mapNotNull { info ->
+            apps = resolveInfos.mapNotNull { info ->
                 val pkg = info.activityInfo.packageName
                 if (pkg == context.packageName) return@mapNotNull null
-                AppModel(
-                    label = info.loadLabel(pm).toString(),
-                    packageName = pkg,
-                    icon = drawableToBitmap(info.loadIcon(pm))
-                )
+                AppModel(info.loadLabel(pm).toString(), pkg, drawableToBitmap(info.loadIcon(pm)))
             }.sortedBy { it.label.lowercase() }
-            apps = loadedApps
         }
     }
 
@@ -243,54 +248,47 @@ fun IOS27LauncherScreen() {
         else apps.filter { it.label.contains(searchQuery, ignoreCase = true) }
     }
 
-    // Animasi Pegas (Spring) Memanjang & Mengecil pada Dynamic Island
-    val islandWidth by animateDpAsState(
-        targetValue = when (islandState) {
-            1 -> 260.dp // Memanjang saat Charging
-            2 -> 280.dp // Memanjang saat Rekam Suara
-            3 -> 300.dp // Menu Tema Ikon
-            else -> 108.dp // Ukuran pas di lubang kamera tengah Infinix Note 30 (tidak menutupi Jam & WiFi)
-        },
-        animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMediumLow),
-        label = "width"
+    // --- ANIMASI SPRING PHYSICS KHAS APPLE iOS (ELASTIS & KENYAL) ---
+    val springSpec = spring<Float>(
+        dampingRatio = 0.62f, // Efek sedikit membal lembut
+        stiffness = Spring.StiffnessMediumLow
     )
 
-    val islandHeight by animateDpAsState(
-        targetValue = when (islandState) {
-            1 -> 46.dp
-            2 -> 56.dp
-            3 -> 76.dp
-            else -> 30.dp
-        },
-        animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMediumLow),
-        label = "height"
-    )
+    val targetWidth = when (islandMode) {
+        IslandMode.IDLE -> 110f
+        IslandMode.CHARGING -> 265f
+        IslandMode.RECORDING_COMPACT -> 180f
+        IslandMode.RECORDING_EXPANDED -> 330f
+        IslandMode.ALARM_COMPACT -> 175f
+        IslandMode.ALARM_EXPANDED -> 320f
+    }
+    val animatedWidth by animateFloatAsState(targetValue = targetWidth, animationSpec = springSpec, label = "w")
 
-    // Animasi Equalizer Gelombang Suara
-    val infiniteTransition = rememberInfiniteTransition(label = "wave")
-    val wave1 by infiniteTransition.animateFloat(
-        initialValue = 7f, targetValue = 23f,
-        animationSpec = infiniteRepeatable(tween(300), RepeatMode.Reverse), label = "w1"
-    )
-    val wave2 by infiniteTransition.animateFloat(
-        initialValue = 22f, targetValue = 8f,
-        animationSpec = infiniteRepeatable(tween(420), RepeatMode.Reverse), label = "w2"
-    )
-    val wave3 by infiniteTransition.animateFloat(
-        initialValue = 10f, targetValue = 25f,
-        animationSpec = infiniteRepeatable(tween(350), RepeatMode.Reverse), label = "w3"
-    )
+    val targetHeight = when (islandMode) {
+        IslandMode.IDLE -> 32f
+        IslandMode.CHARGING -> 46f
+        IslandMode.RECORDING_COMPACT -> 38f
+        IslandMode.RECORDING_EXPANDED -> 88f
+        IslandMode.ALARM_COMPACT -> 38f
+        IslandMode.ALARM_EXPANDED -> 86f
+    }
+    val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
 
-    // Latar Belakang Transparan Bergradien Halus Menyatu dengan Wallpaper Sistem dari Ujung Atas
+    // Equalizer Suara
+    val infiniteTransition = rememberInfiniteTransition(label = "eq")
+    val wave1 by infiniteTransition.animateFloat(8f, 22f, infiniteRepeatable(tween(280), RepeatMode.Reverse), label = "")
+    val wave2 by infiniteTransition.animateFloat(22f, 9f, infiniteRepeatable(tween(400), RepeatMode.Reverse), label = "")
+    val wave3 by infiniteTransition.animateFloat(11f, 26f, infiniteRepeatable(tween(340), RepeatMode.Reverse), label = "")
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF0A1128).copy(alpha = 0.45f), // Atas lebih bening agar bar WiFi menyatu dengan wallpaper
+                        Color(0xFF0A1128).copy(alpha = 0.40f),
                         Color(0xFF1C2541).copy(alpha = 0.65f),
-                        Color(0xFF0B132B).copy(alpha = 0.78f)
+                        Color(0xFF0B132B).copy(alpha = 0.80f)
                     )
                 )
             )
@@ -302,147 +300,193 @@ fun IOS27LauncherScreen() {
                 .padding(horizontal = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Posisi Dynamic Island tepat di garis kamera depan Infinix Note 30 (sejajar dengan Jam & WiFi)
             Spacer(modifier = Modifier.height(6.dp))
 
-            // 1. DYNAMIC ISLAND
+            // --- 1. DYNAMIC ISLAND (AUTENTIK APPLE HIG) ---
             Box(
                 modifier = Modifier
-                    .width(islandWidth)
-                    .height(islandHeight)
-                    .clip(RoundedCornerShape(40.dp))
+                    .width(animatedWidth.dp)
+                    .height(animatedHeight.dp)
+                    .clip(RoundedCornerShape(42.dp))
                     .background(Color.Black)
-                    .border(0.7.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(40.dp))
+                    .border(0.7.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(42.dp))
                     .combinedClickable(
                         onClick = {
                             triggerHaptic(context)
-                            islandState = when (islandState) {
-                                0 -> 2
-                                2 -> 3
-                                else -> 0
+                            // Interaktivitas klik fungsi resmi:
+                            islandMode = when (islandMode) {
+                                IslandMode.RECORDING_COMPACT -> IslandMode.RECORDING_EXPANDED
+                                IslandMode.RECORDING_EXPANDED -> IslandMode.RECORDING_COMPACT
+                                IslandMode.ALARM_COMPACT -> IslandMode.ALARM_EXPANDED
+                                IslandMode.ALARM_EXPANDED -> IslandMode.ALARM_COMPACT
+                                IslandMode.IDLE -> IslandMode.RECORDING_COMPACT // Klik saat idle mengaktifkan demo rekam
+                                else -> IslandMode.IDLE
                             }
                         },
                         onLongClick = {
                             triggerHaptic(context)
-                            islandState = if (islandState == 1) 0 else 1
+                            // Tekan lama beralih ke simulasi fungsi Alarm
+                            islandMode = if (islandMode == IslandMode.ALARM_COMPACT) IslandMode.IDLE else IslandMode.ALARM_COMPACT
                         }
                     )
                     .padding(horizontal = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
-                when (islandState) {
-                    // IDLE: Bersih tanpa tulisan iOS 27
-                    0 -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(11.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF101012))
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (isCharging) Color(0xFF30D158)
-                                        else Color(0xFF18181A)
-                                    )
-                            )
-                        }
-                    }
-
-                    // CHARGING: Memanjang saat cas dicolok
-                    1 -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("⚡", fontSize = 15.sp)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    "Mengisi Daya",
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                AnimatedContent(
+                    targetState = islandMode,
+                    transitionSpec = {
+                        (fadeIn(animationSpec = tween(180, delayMillis = 60)) + scaleIn(initialScale = 0.92f))
+                            .togetherWith(fadeOut(animationSpec = tween(120)) + scaleOut(targetScale = 0.92f))
+                    },
+                    label = "content"
+                ) { mode ->
+                    when (mode) {
+                        IslandMode.IDLE -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101012)))
+                                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (isCharging) Color(0xFF30D158) else Color(0xFF18181A)))
                             }
-                            Text(
-                                "$batteryPct%",
-                                color = Color(0xFF30D158),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
-                            )
                         }
-                    }
 
-                    // VOICE RECORDING: Gelombang Suara & Timer
-                    2 -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(9.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFFF453A))
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
+                        IslandMode.CHARGING -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("⚡", fontSize = 15.sp)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Mengisi Daya", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                                Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // REKAM SUARA (MODE RAMPING)
+                        IslandMode.RECORDING_COMPACT -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF453A)))
                                 Text(
-                                    String.format("Rec %02d:%02d", recordSeconds / 60, recordSeconds % 60),
+                                    String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
                                     color = Color(0xFFFF453A),
-                                    fontSize = 13.sp,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(2.5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    listOf(wave1, wave2, wave3, wave1).forEach { h ->
+                                        Box(modifier = Modifier.width(2.5.dp).height(h.dp).clip(RoundedCornerShape(1.dp)).background(Color(0xFFFF9F0A)))
+                                    }
+                                }
+                            }
+                        }
+
+                        // REKAM SUARA (MODE MEKAR / DIKLIK)
+                        IslandMode.RECORDING_EXPANDED -> {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF453A)))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Memo Suara", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    Text(
+                                        String.format("%02d:%02d", recordSeconds / 60, recordSeconds % 60),
+                                        color = Color(0xFFFF453A),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(3.5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        listOf(wave1, wave2, wave3, wave2, wave1, wave3, wave2).forEach { h ->
+                                            Box(modifier = Modifier.width(3.dp).height((h * 1.2).dp).clip(RoundedCornerShape(2.dp)).background(Color(0xFFFF9F0A)))
+                                        }
+                                    }
+                                    Button(
+                                        onClick = { islandMode = IslandMode.IDLE },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF453A)),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("Berhenti", fontSize = 11.sp, color = Color.White)
+                                    }
+                                }
+                            }
+                        }
+
+                        // ALARM (MODE RAMPING)
+                        IslandMode.ALARM_COMPACT -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("🔔", fontSize = 12.sp)
+                                Text(
+                                    String.format("%02ds", alarmSeconds),
+                                    color = Color(0xFFFF9F0A),
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(3.5.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                        }
+
+                        // ALARM (MODE MEKAR / DIKLIK)
+                        IslandMode.ALARM_EXPANDED -> {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.Center
                             ) {
-                                listOf(wave1, wave2, wave3, wave1, wave2).forEach { h ->
-                                    Box(
-                                        modifier = Modifier
-                                            .width(3.dp)
-                                            .height(h.dp)
-                                            .clip(RoundedCornerShape(2.dp))
-                                            .background(Color(0xFFFF9F0A))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("⏰", fontSize = 14.sp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Alarm Berjalan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    Text(
+                                        String.format("%02ds lagi", alarmSeconds),
+                                        color = Color(0xFFFF9F0A),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
                                     )
                                 }
-                            }
-                        }
-                    }
-
-                    // MENU TEMA IKON
-                    3 -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                val modeName = when (iconMode) {
-                                    1 -> "Dark Glass"
-                                    2 -> "Cyan Tinted"
-                                    else -> "Default Light"
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    Button(
+                                        onClick = { islandMode = IslandMode.IDLE },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("Matikan", fontSize = 11.sp, color = Color.White)
+                                    }
                                 }
-                                Text("Mode Ikon", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                Text(modeName, color = Color.White.copy(0.7f), fontSize = 11.sp)
-                            }
-                            Button(
-                                onClick = { iconMode = (iconMode + 1) % 3 },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0A84FF)),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                            ) {
-                                Text("Ubah", fontSize = 12.sp)
                             }
                         }
                     }
@@ -451,7 +495,7 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // 2. WIDGET CUACA ASLI & BATERAI ASLI (TANPA TEKS ANDROID 14)
+            // --- 2. WIDGET BARIS ATAS (BATERAI MURNI NON-KLIK) ---
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -489,7 +533,7 @@ fun IOS27LauncherScreen() {
                     }
                 }
 
-                // Widget Baterai Real-time
+                // Widget Baterai Real-Time (MURNI INDIKATOR, KLIK SUDAH DINONAKTIFKAN)
                 val batteryColor = when {
                     isCharging -> Color(0xFF30D158)
                     batteryPct <= 20 -> Color(0xFFFF453A)
@@ -503,10 +547,6 @@ fun IOS27LauncherScreen() {
                         .clip(RoundedCornerShape(26.dp))
                         .background(Color.White.copy(alpha = 0.15f))
                         .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(26.dp))
-                        .clickable {
-                            triggerHaptic(context)
-                            islandState = 1
-                        }
                         .padding(16.dp)
                 ) {
                     Column(
@@ -558,7 +598,7 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // 3. GRID APLIKASI UTAMA
+            // --- 3. GRID APLIKASI ---
             LazyVerticalGrid(
                 columns = GridCells.Fixed(4),
                 modifier = Modifier.weight(1f),
@@ -581,18 +621,8 @@ fun IOS27LauncherScreen() {
                             modifier = Modifier
                                 .size(62.dp)
                                 .clip(RoundedCornerShape(16.dp))
-                                .background(
-                                    when (iconMode) {
-                                        1 -> Color(0xFF1C1C1E).copy(alpha = 0.92f)
-                                        2 -> Color(0xFF0A84FF).copy(alpha = 0.25f)
-                                        else -> Color.White.copy(alpha = 0.18f)
-                                    }
-                                )
-                                .border(
-                                    0.8.dp,
-                                    Color.White.copy(alpha = if (iconMode == 1) 0.15f else 0.35f),
-                                    RoundedCornerShape(16.dp)
-                                )
+                                .background(Color.White.copy(alpha = 0.18f))
+                                .border(0.8.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
                                 .padding(6.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -601,12 +631,7 @@ fun IOS27LauncherScreen() {
                                 contentDescription = app.label,
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .clip(RoundedCornerShape(12.dp)),
-                                colorFilter = when (iconMode) {
-                                    1 -> ColorFilter.lighting(Color(0xFFCCCCCC), Color(0xFF111111))
-                                    2 -> ColorFilter.lighting(Color(0xFF64D2FF), Color(0xFF002244))
-                                    else -> null
-                                }
+                                    .clip(RoundedCornerShape(12.dp))
                             )
                         }
                         Spacer(modifier = Modifier.height(6.dp))
@@ -624,7 +649,7 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 4. TOMBOL CARI (SPOTLIGHT)
+            // --- 4. SPOTLIGHT PILL ---
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
@@ -651,7 +676,7 @@ fun IOS27LauncherScreen() {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // 5. GLASS DOCK BAWAH
+            // --- 5. GLASS DOCK BAWAH ---
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
