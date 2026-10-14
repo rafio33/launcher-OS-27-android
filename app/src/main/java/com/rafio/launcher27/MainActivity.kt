@@ -80,8 +80,7 @@ data class WeatherData(
 
 enum class IslandActiveFeature {
     SPOTIFY,
-    VOICE_MEMO,
-    ALARM
+    VOICE_MEMO
 }
 
 // Controller Spotify & Media (Aman, Tanpa Izin Rahasia / Bebas Cekal Play Protect)
@@ -346,8 +345,8 @@ fun IOS27LauncherScreen() {
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Spacer pas di bawah Dynamic Island
-            Spacer(modifier = Modifier.height(56.dp))
+            // Spacer reservasi ruang di bawah Dynamic Island
+            Spacer(modifier = Modifier.height(74.dp))
 
             HorizontalPager(
                 state = pagerState,
@@ -528,12 +527,12 @@ fun IOS27LauncherScreen() {
             )
         }
 
-        // LAYER 2: DYNAMIC ISLAND INTERAKTIF (MUDAH DIKLIK & LENGKAP DENGAN MENU)
-        // Posisi top = 10.dp menjamin sentuhan jari langsung terdeteksi tanpa terhalang gesture bar status Android
+        // LAYER 2: DYNAMIC ISLAND (tap untuk buka/tutup)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 10.dp)
+                .statusBarsPadding()
+                .padding(top = 3.dp)
                 .zIndex(20f),
             contentAlignment = Alignment.TopCenter
         ) {
@@ -577,9 +576,7 @@ fun DynamicIslandBar(
     var isRecording by remember { mutableStateOf(false) }
     var recordSeconds by remember { mutableIntStateOf(0) }
 
-    // State Alarm & Timer
-    var isAlarmRunning by remember { mutableStateOf(false) }
-    var alarmSeconds by remember { mutableIntStateOf(45) }
+
 
     // State Animasi Charger
     var showChargingBanner by remember { mutableStateOf(false) }
@@ -611,17 +608,7 @@ fun DynamicIslandBar(
         }
     }
 
-    // Timer Alarm
-    LaunchedEffect(isAlarmRunning) {
-        while (isAlarmRunning && alarmSeconds > 0) {
-            delay(1000)
-            alarmSeconds--
-        }
-        if (alarmSeconds <= 0 && isAlarmRunning) {
-            isAlarmRunning = false
-            triggerHaptic(context)
-        }
-    }
+
 
     // Pegas Animasi Dynamic Island
     val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
@@ -629,17 +616,16 @@ fun DynamicIslandBar(
     val targetWidth = when {
         isExpanded -> 344f
         showChargingBanner -> 268f
-        isRecording -> 180f
-        isAlarmRunning -> 175f
-        isPlaying -> 215f
-        else -> 150f
+        isRecording -> 185f
+        isPlaying -> 220f
+        else -> 120f  // Pill hitam kecil saat idle
     }
     val animatedWidth by animateFloatAsState(targetValue = targetWidth, animationSpec = springSpec, label = "w")
 
     val targetHeight = when {
-        isExpanded -> 210f
+        isExpanded -> 195f
         showChargingBanner -> 44f
-        else -> 38f
+        else -> 42f  // Lebih tinggi, lebih mudah diklik
     }
     val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "h")
 
@@ -660,9 +646,7 @@ fun DynamicIslandBar(
                 indication = null
             ) {
                 triggerHaptic(context)
-                if (!isExpanded) {
-                    isExpanded = true
-                }
+                isExpanded = !isExpanded  // Tap mana saja untuk buka/tutup
             }
             .padding(horizontal = if (isExpanded) 14.dp else 12.dp, vertical = if (isExpanded) 10.dp else 0.dp),
         contentAlignment = Alignment.Center
@@ -702,59 +686,48 @@ fun DynamicIslandBar(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        MiniEqualizer(isPlaying = true, barColor = Color(0xFFFF9F0A), modifier = Modifier.size(18.dp, 12.dp))
-                    }
-                }
-
-                isAlarmRunning -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("🔔", fontSize = 12.sp)
-                        Text(String.format("%02ds", alarmSeconds), color = Color(0xFFFF9F0A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        MiniEqualizer(isPlaying = true, barColor = Color(0xFFFF453A), modifier = Modifier.size(18.dp, 12.dp))
                     }
                 }
 
                 isPlaying -> {
+                    // Tampilkan judul lagu yang sedang putar
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("🟢", fontSize = 10.sp)
-                            Spacer(modifier = Modifier.width(5.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1DB954))
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = trackTitle,
                                 color = Color.White,
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.widthIn(max = 110.dp)
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+                        Spacer(modifier = Modifier.width(4.dp))
                         MiniEqualizer(isPlaying = true, barColor = Color(0xFF1DB954), modifier = Modifier.size(20.dp, 13.dp))
                     }
                 }
 
                 else -> {
-                    // Siaga Normal (Kamera Punchhole Kiri + Teks Kanan)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF101014)))
-                        Text("iOS 27 • Buka", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(Color(0xFF30D158)))
-                    }
+                    // Dynamic Bar — Idle: pill hitam murni, tanpa teks
                 }
             }
         } else {
-            // MODE EXPANDED: MENU LENGKAP (SPOTIFY, PEREKAM SUARA, ALARM)
+            // MODE EXPANDED: MENU SPOTIFY & PEREKAM SUARA
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.SpaceBetween
@@ -803,36 +776,6 @@ fun DynamicIslandBar(
                                 fontWeight = FontWeight.Bold
                             )
                         }
-
-                        // Tab Alarm
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (activeTab == IslandActiveFeature.ALARM) Color(0xFFFF9F0A) else Color.White.copy(0.12f))
-                                .clickable {
-                                    triggerHaptic(context)
-                                    activeTab = IslandActiveFeature.ALARM
-                                }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                "⏰ Alarm",
-                                color = if (activeTab == IslandActiveFeature.ALARM) Color.Black else Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    // Tombol Kecilkan / Tutup
-                    IconButton(
-                        onClick = {
-                            triggerHaptic(context)
-                            isExpanded = false
-                        },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Text("▾", color = Color.White.copy(alpha = 0.8f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
@@ -998,81 +941,8 @@ fun DynamicIslandBar(
                         }
                     }
 
-                    IslandActiveFeature.ALARM -> {
-                        // KONTEN ALARM & TIMER
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("⏰", fontSize = 18.sp)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text("Timer Alarm", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                    Text(if (isAlarmRunning) "Hitungan mundur aktif" else "Siap dimulai", color = Color.White.copy(0.7f), fontSize = 11.sp)
-                                }
-                            }
-                            Text(
-                                String.format("%02ds", alarmSeconds),
-                                color = Color(0xFFFF9F0A),
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        // Pilihan Waktu Cepat
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            listOf(30 to "+30s", 60 to "+1m", 300 to "+5m").forEach { (sec, label) ->
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color.White.copy(0.15f))
-                                        .clickable {
-                                            triggerHaptic(context)
-                                            alarmSeconds += sec
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text(label, color = Color.White, fontSize = 11.sp)
-                                }
-                            }
-                        }
-
-                        // Tombol Kontrol Alarm
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Button(
-                                onClick = {
-                                    triggerHaptic(context)
-                                    isAlarmRunning = !isAlarmRunning
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9F0A)),
-                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
-                            ) {
-                                Text(if (isAlarmRunning) "⏸ Jeda" else "▶ Mulai Timer", fontSize = 12.sp, color = Color.Black, fontWeight = FontWeight.Bold)
-                            }
-
-                            Button(
-                                onClick = {
-                                    triggerHaptic(context)
-                                    isAlarmRunning = false
-                                    alarmSeconds = 45
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A3A3C)),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
-                            ) {
-                                Text("🔄 Reset", fontSize = 12.sp, color = Color.White)
-                            }
-                        }
-                    }
                 }
+            }
             }
         }
     }
