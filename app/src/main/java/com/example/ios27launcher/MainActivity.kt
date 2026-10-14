@@ -6,11 +6,14 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
+import android.media.AudioManager
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -83,6 +86,53 @@ enum class IslandMode {
     RECORDING_EXPANDED,
     ALARM_COMPACT,
     ALARM_EXPANDED
+}
+
+// State Pemutar Musik Spotify (Aman, Tanpa Izin Berbahaya, Tidak Dicekal Play Protect)
+object SpotifyMediaState {
+    var isPlaying by mutableStateOf(false)
+    var trackTitle by mutableStateOf("Spotify")
+    var trackArtist by mutableStateOf("Siap memutar musik")
+    var albumTitle by mutableStateOf("")
+    var trackDurationMs by mutableLongStateOf(0L)
+    var trackPositionMs by mutableLongStateOf(0L)
+    var hasTrackInfo by mutableStateOf(false)
+
+    fun openSpotify(context: Context) {
+        val launchIntent = context.packageManager.getLaunchIntentForPackage("com.spotify.music")
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(launchIntent)
+        } else {
+            val storeIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.spotify.music")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try { context.startActivity(storeIntent) } catch (_: Exception) {}
+        }
+    }
+
+    fun playPause(context: Context) {
+        sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+        isPlaying = !isPlaying
+    }
+
+    fun next(context: Context) {
+        sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_NEXT)
+        isPlaying = true
+    }
+
+    fun previous(context: Context) {
+        sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+        isPlaying = true
+    }
+
+    private fun sendMediaKeyEvent(context: Context, keyCode: Int) {
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            am?.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am?.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        } catch (_: Exception) {}
+    }
 }
 
 fun drawableToBitmap(drawable: Drawable): ImageBitmap {
@@ -162,7 +212,7 @@ fun IOS27LauncherScreen() {
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // Spotify Broadcast Receiver (Mendengarkan event lagu langsung dari Spotify)
+    // Spotify Broadcast Receiver (Membaca event lagu asli langsung dari Spotify)
     DisposableEffect(context) {
         val spotifyReceiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -171,18 +221,20 @@ fun IOS27LauncherScreen() {
                     "com.spotify.music.metadatachanged" -> {
                         val track = intent.getStringExtra("track") ?: return
                         val artist = intent.getStringExtra("artist") ?: "Spotify"
+                        val album = intent.getStringExtra("album") ?: ""
                         val length = intent.getIntExtra("length", 0)
-                        MediaStateHolder.trackTitle = track
-                        MediaStateHolder.trackArtist = artist
-                        if (length > 0) MediaStateHolder.trackDurationMs = length.toLong()
-                        MediaStateHolder.hasActiveMedia = true
+                        SpotifyMediaState.trackTitle = track
+                        SpotifyMediaState.trackArtist = artist
+                        SpotifyMediaState.albumTitle = album
+                        if (length > 0) SpotifyMediaState.trackDurationMs = length.toLong()
+                        SpotifyMediaState.hasTrackInfo = true
                     }
                     "com.spotify.music.playbackstatechanged" -> {
                         val playing = intent.getBooleanExtra("playing", false)
                         val position = intent.getIntExtra("playbackPosition", 0)
-                        MediaStateHolder.isPlaying = playing
-                        MediaStateHolder.trackPositionMs = position.toLong()
-                        MediaStateHolder.hasActiveMedia = true
+                        SpotifyMediaState.isPlaying = playing
+                        SpotifyMediaState.trackPositionMs = position.toLong()
+                        SpotifyMediaState.hasTrackInfo = true
                     }
                 }
             }
@@ -199,6 +251,14 @@ fun IOS27LauncherScreen() {
         }
         onDispose {
             try { context.unregisterReceiver(spotifyReceiver) } catch (_: Exception) {}
+        }
+    }
+
+    // Periksa status musik sistem
+    LaunchedEffect(Unit) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (am?.isMusicActive == true) {
+            SpotifyMediaState.isPlaying = true
         }
     }
 
@@ -497,7 +557,7 @@ fun IOS27LauncherScreen() {
 }
 
 // ==========================================
-// DYNAMIC ISLAND BAR (REAL SPOTIFY & ZERO LAG)
+// DYNAMIC ISLAND BAR (SPOTIFY & ZERO LAG)
 // ==========================================
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -508,14 +568,12 @@ fun DynamicIslandBar(
     val context = LocalContext.current
     var islandMode by remember { mutableStateOf(IslandMode.IDLE) }
 
-    // Membaca state real Spotify langsung dari MediaStateHolder
-    val isPlaying = MediaStateHolder.isPlaying
-    val trackTitle = MediaStateHolder.trackTitle
-    val trackArtist = MediaStateHolder.trackArtist
-    val albumArt = MediaStateHolder.albumArtBitmap
-    val durationMs = MediaStateHolder.trackDurationMs
+    // Membaca state real Spotify langsung dari SpotifyMediaState
+    val isPlaying = SpotifyMediaState.isPlaying
+    val trackTitle = SpotifyMediaState.trackTitle
+    val trackArtist = SpotifyMediaState.trackArtist
+    val durationMs = SpotifyMediaState.trackDurationMs
     var localPositionMs by remember { mutableLongStateOf(0L) }
-    val isAccessGranted = remember { MediaStateHolder.isNotificationAccessGranted(context) }
 
     // State Perekam Suara Terisolasi
     var recordSeconds by remember { mutableIntStateOf(0) }
@@ -531,8 +589,8 @@ fun DynamicIslandBar(
     }
 
     // Sinkronisasi posisi progress lagu saat playing
-    LaunchedEffect(isPlaying, MediaStateHolder.trackPositionMs) {
-        localPositionMs = MediaStateHolder.trackPositionMs
+    LaunchedEffect(isPlaying, SpotifyMediaState.trackPositionMs) {
+        localPositionMs = SpotifyMediaState.trackPositionMs
         while (isPlaying) {
             delay(1000)
             localPositionMs += 1000L
@@ -597,7 +655,7 @@ fun DynamicIslandBar(
         IslandMode.IDLE -> 33f
         IslandMode.CHARGING -> 46f
         IslandMode.MUSIC_COMPACT -> 36f
-        IslandMode.MUSIC_EXPANDED -> 190f
+        IslandMode.MUSIC_EXPANDED -> 184f
         IslandMode.RECORDING_COMPACT -> 38f
         IslandMode.RECORDING_EXPANDED -> 88f
         IslandMode.ALARM_COMPACT -> 38f
@@ -690,26 +748,16 @@ fun DynamicIslandBar(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Kiri: Cover Spotify / Album Art Real
+                        // Kiri: Ikon Spotify Hijau Khas
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (albumArt != null) {
-                                Image(
-                                    bitmap = albumArt,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                )
-                            } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF1DB954)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("🎵", fontSize = 10.sp)
-                                }
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1DB954)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("🎵", fontSize = 10.sp)
                             }
                             Spacer(modifier = Modifier.width(7.dp))
                             Text(
@@ -736,41 +784,28 @@ fun DynamicIslandBar(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 10.dp),
+                            .padding(vertical = 12.dp),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Header Baris 1: Cover Album Asli + Info Judul & Artis Spotify + Waveform
+                        // Header Baris 1: Cover Album Spotify + Info Judul & Artis + Waveform
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Cover Album Real Spotify
-                            if (albumArt != null) {
-                                Image(
-                                    bitmap = albumArt,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(52.dp)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
-                                        .clickable { MediaStateHolder.openSpotify(context) }
-                                )
-                            } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(52.dp)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(
-                                            Brush.linearGradient(
-                                                listOf(Color(0xFF1DB954), Color(0xFF191414))
-                                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(50.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFF1DB954), Color(0xFF191414))
                                         )
-                                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
-                                        .clickable { MediaStateHolder.openSpotify(context) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("🎧", fontSize = 24.sp)
-                                }
+                                    )
+                                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
+                                    .clickable { SpotifyMediaState.openSpotify(context) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("🎧", fontSize = 24.sp)
                             }
 
                             Spacer(modifier = Modifier.width(12.dp))
@@ -801,25 +836,7 @@ fun DynamicIslandBar(
                             )
                         }
 
-                        // Banner Bantuan jika Akses Notifikasi belum diizinkan
-                        if (!isAccessGranted) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF1DB954).copy(alpha = 0.2f))
-                                    .clickable { MediaStateHolder.openNotificationAccessSettings(context) }
-                                    .padding(horizontal = 8.dp, vertical = 3.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("⚠️ Izinkan Akses Notifikasi Media", fontSize = 10.sp, color = Color.White)
-                                Text("Izinkan ➔", fontSize = 10.sp, color = Color(0xFF1DB954), fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
 
                         // Timeline Durasi Real Lagu Spotify
                         val currentSec = (localPositionMs / 1000L).coerceAtLeast(0L)
@@ -860,9 +877,9 @@ fun DynamicIslandBar(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                        // Kontrol Musik Real Spotify (Prev, Play/Pause, Next)
+                        // Kontrol Musik Real Spotify (Prev, Play/Pause, Next, Buka Spotify)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -879,7 +896,7 @@ fun DynamicIslandBar(
                             IconButton(
                                 onClick = {
                                     triggerHaptic(context)
-                                    MediaStateHolder.skipPrevious(context)
+                                    SpotifyMediaState.previous(context)
                                 },
                                 modifier = Modifier.size(36.dp)
                             ) {
@@ -894,7 +911,7 @@ fun DynamicIslandBar(
                                     .background(Color.White)
                                     .clickable {
                                         triggerHaptic(context)
-                                        MediaStateHolder.playPause(context)
+                                        SpotifyMediaState.playPause(context)
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
@@ -910,7 +927,7 @@ fun DynamicIslandBar(
                             IconButton(
                                 onClick = {
                                     triggerHaptic(context)
-                                    MediaStateHolder.skipNext(context)
+                                    SpotifyMediaState.next(context)
                                 },
                                 modifier = Modifier.size(36.dp)
                             ) {
@@ -921,11 +938,11 @@ fun DynamicIslandBar(
                             IconButton(
                                 onClick = {
                                     triggerHaptic(context)
-                                    MediaStateHolder.openSpotify(context)
+                                    SpotifyMediaState.openSpotify(context)
                                 },
                                 modifier = Modifier.size(32.dp)
                             ) {
-                                Text("🟢", fontSize = 13.sp)
+                                Text("🟢", fontSize = 14.sp)
                             }
                         }
                     }
@@ -1422,7 +1439,7 @@ fun AppContextMenu(
                         .fillMaxWidth()
                         .clickable {
                             val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = android.net.Uri.parse("package:${app.packageName}")
+                                data = Uri.parse("package:${app.packageName}")
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
                             context.startActivity(intent)
