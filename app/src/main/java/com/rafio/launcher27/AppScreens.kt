@@ -1223,7 +1223,7 @@ fun CalculatorScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var display by remember { mutableStateOf("0") }
     var currentOp by remember { mutableStateOf<String?>(null) }
-    var firstOperand by remember { mutableDoubleStateOf(0.0) }
+    var firstOperand by remember { mutableStateOf(0.0) }
     var clearOnNext by remember { mutableStateOf(false) }
 
     Column(
@@ -1487,18 +1487,15 @@ fun AIAssistantScreen(onBack: () -> Unit) {
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
-                OutlinedTextField(
+                if (inputQuery.isEmpty()) {
+                    Text("Ask anything...", color = Color(0xFF8E8E93), fontSize = 14.sp)
+                }
+                androidx.compose.foundation.text.BasicTextField(
                     value = inputQuery,
                     onValueChange = { inputQuery = it },
-                    placeholder = { Text("Ask anything...", color = Color(0xFF8E8E93), fontSize = 13.sp) },
                     singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedBorderColor = Color.Transparent
-                    ),
-                    modifier = Modifier.fillMaxSize()
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
 

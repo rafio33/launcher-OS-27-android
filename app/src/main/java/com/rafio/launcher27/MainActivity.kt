@@ -75,9 +75,12 @@ fun drawableToBitmap(drawable: Drawable): ImageBitmap {
     return bmp.asImageBitmap()
 }
 
-fun triggerHaptic(context: Context) {
-    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-    vibrator?.vibrate(VibrationEffect.createOneShot(25, VibrationEffect.DEFAULT_AMPLITUDE))
+fun triggerHaptic(context: Context?) {
+    if (context == null) return
+    try {
+        val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        vibrator?.vibrate(VibrationEffect.createOneShot(25, VibrationEffect.DEFAULT_AMPLITUDE))
+    } catch (_: Exception) {}
 }
 
 fun launchApp(context: Context, packageName: String) {

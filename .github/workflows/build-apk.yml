@@ -30,7 +30,7 @@ jobs:
           
       - name: Build Optimized 2MB Release APK
         run: |
-          gradle assembleRelease --no-daemon
+          gradle assembleRelease --no-daemon --stacktrace
           mkdir -p output_apk
           cp app/build/outputs/apk/release/app-release.apk output_apk/iOS27-Spatial-Launcher.apk
 
