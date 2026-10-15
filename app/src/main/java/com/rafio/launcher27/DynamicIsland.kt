@@ -7,8 +7,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -23,7 +21,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -31,214 +28,132 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-// Mode Dynamic Island sesuai referensi screenshot iOS:
-// 1. MUSIC  -> Now Playing: Beach Bunny - Entropy (Phone 3 / Bawah)
-// 2. CALL   -> Panggilan Berlangsung: 📞 0:08 + Waveform Suara (Phone 2 / Tengah)
-// 3. IDLE   -> Notch Pill Hitam Kamera Standby (Phone 1 / Atas)
-enum class IslandMode {
-    MUSIC,
-    CALL,
-    IDLE
-}
-
-// ==========================================
-// CONTAINER STATUS BAR + DYNAMIC ISLAND UTAMA
-// ==========================================
+// =========================================================================
+// CONTAINER DYNAMIC ISLAND BERSIH (TANPA JAM / SINYAL DI DALAM / SAMPING BAR)
+// Sesuai Instruksi: "dynamic bar ada jam sinyal juga jangan diikut sertakan bagian bar"
+// =========================================================================
 @Composable
-fun IosTopStatusBarContainer(
-    batteryPct: Int,
-    isCharging: Boolean,
+fun CleanDynamicIslandContainer(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var isExpanded by remember { mutableStateOf(false) }
-    var currentMode by remember { mutableStateOf(IslandMode.MUSIC) }
-    var timeString by remember { mutableStateOf("9:41") }
+    val isExpanded = GlobalIslandState.isExpanded
 
-    // Update jam real-time HP atau default ke 9:41
-    LaunchedEffect(Unit) {
-        val sdf = SimpleDateFormat("H:mm", Locale.getDefault())
-        while (true) {
-            timeString = sdf.format(Date())
-            delay(10000)
+    // Timer Putar Musik Real-Time
+    LaunchedEffect(GlobalIslandState.isPlaying) {
+        while (GlobalIslandState.isPlaying) {
+            delay(1000)
+            GlobalIslandState.trackPositionMs += 1000L
+            if (GlobalIslandState.trackPositionMs > GlobalIslandState.currentSong.durationMs) {
+                GlobalIslandState.trackPositionMs = 0L
+                GlobalIslandState.playNext(context = null)
+            }
         }
     }
 
-    // Scrim penutup luar saat expanded (Tap luar untuk menutup Dynamic Island)
+    // Timer Detik Hitung Mundur (Mode Timer Image 1: 00:14)
+    LaunchedEffect(GlobalIslandState.isTimerRunning, GlobalIslandState.currentMode) {
+        while (GlobalIslandState.isTimerRunning && GlobalIslandState.currentMode == IslandMode.TIMER) {
+            delay(1000)
+            if (GlobalIslandState.timerSeconds > 0) {
+                GlobalIslandState.timerSeconds--
+            } else {
+                GlobalIslandState.timerSeconds = 14
+            }
+        }
+    }
+
+    // Timer Rekam Video / Audio (Mode Rekaman Image 1: 00:05)
+    LaunchedEffect(GlobalIslandState.isRecordingActive, GlobalIslandState.currentMode) {
+        while (GlobalIslandState.currentMode == IslandMode.RECORDING) {
+            delay(1000)
+            GlobalIslandState.recordingSeconds++
+        }
+    }
+
+    // Timer Panggilan (0:08)
+    LaunchedEffect(GlobalIslandState.currentMode) {
+        if (GlobalIslandState.currentMode == IslandMode.CALL && !GlobalIslandState.isIncomingCall) {
+            while (true) {
+                delay(1000)
+                GlobalIslandState.callSeconds++
+            }
+        }
+    }
+
+    // Scrim penutup saat Dynamic Island expanded (tap luar untuk collapse)
     if (isExpanded) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .zIndex(24f)
+                .zIndex(40f)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
                 ) {
                     triggerHaptic(context)
-                    isExpanded = false
+                    GlobalIslandState.isExpanded = false
                 }
         )
     }
 
+    // Dynamic Island Bar Murni di Posisi Atas Layar (Tanpa Jam & Tanpa Sinyal)
     Box(
         modifier = modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(top = 3.dp)
-            .zIndex(26f),
+            .padding(top = 8.dp)
+            .zIndex(45f),
         contentAlignment = Alignment.TopCenter
     ) {
-        // LAPISAN 1: STATUS BAR SAMPING (Hanya tampil saat compact)
-        AnimatedVisibility(
-            visible = !isExpanded,
-            enter = fadeIn(tween(180)),
-            exit = fadeOut(tween(120))
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 22.dp)
-                    .height(36.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Jam Kiri ala iOS: 9:41
-                Text(
-                    text = timeString,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = (-0.3).sp
-                )
-
-                // Ikon Kanan: Sinyal, Wi-Fi, Privacy Dot (jika CALL), dan Baterai
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (currentMode != IslandMode.CALL) {
-                        CellularSignalIcon(modifier = Modifier.size(16.dp, 11.dp))
-                        WifiIcon(modifier = Modifier.size(15.dp, 11.dp))
-                    }
-
-                    // Orange Microphone Privacy Indicator Dot (Persis di Screenshot Handphone Tengah saat CALL)
-                    if (currentMode == IslandMode.CALL) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFFFF9F0A))
-                        )
-                    }
-
-                    // Kapsul Baterai iOS
-                    BatteryPillIcon(
-                        pct = batteryPct,
-                        isCharging = isCharging,
-                        modifier = Modifier.size(24.dp, 11.5.dp)
-                    )
-                }
-            }
-        }
-
-        // LAPISAN 2: DYNAMIC ISLAND INTERAKTIF
-        DynamicIslandBar(
-            batteryPct = batteryPct,
-            isCharging = isCharging,
-            isExpanded = isExpanded,
-            onExpandedChange = { isExpanded = it },
-            currentMode = currentMode,
-            onModeChange = { currentMode = it }
-        )
+        InteractiveDynamicIslandBar()
     }
 }
 
-// ==========================================
-// DYNAMIC ISLAND BAR (COMPACT & EXPANDED)
-// ==========================================
+// =========================================================================
+// INTERACTIVE DYNAMIC ISLAND BAR (COMPACT & EXPANDED)
+// =========================================================================
 @Composable
-fun DynamicIslandBar(
-    batteryPct: Int,
-    isCharging: Boolean,
-    isExpanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    currentMode: IslandMode,
-    onModeChange: (IslandMode) -> Unit,
+fun InteractiveDynamicIslandBar(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var showAirPlaySheet by remember { mutableStateOf(false) }
-
-    // State Lagu Spotify / Media
-    val isPlaying = SpotifyMediaState.isPlaying
-    val trackTitle = SpotifyMediaState.trackTitle
-    val trackArtist = SpotifyMediaState.trackArtist
-    val durationMs = SpotifyMediaState.trackDurationMs
-
-    // State Panggilan Aktif (Mulai dari 0:08 sesuai screenshot)
-    var callSeconds by remember { mutableIntStateOf(8) }
-
-    // State Banner Charger
-    var showChargingBanner by remember { mutableStateOf(false) }
-
-    // Timer Putar Musik
-    LaunchedEffect(isPlaying) {
-        while (isPlaying) {
-            delay(1000)
-            SpotifyMediaState.trackPositionMs += 1000L
-            if (SpotifyMediaState.trackPositionMs > SpotifyMediaState.trackDurationMs) {
-                SpotifyMediaState.trackPositionMs = 0L
-            }
-        }
-    }
-
-    // Timer Panggilan Telepon (0:08, 0:09, 0:10...)
-    LaunchedEffect(currentMode) {
-        if (currentMode == IslandMode.CALL) {
-            while (true) {
-                delay(1000)
-                callSeconds++
-            }
-        }
-    }
-
-    // Deteksi Charger
-    LaunchedEffect(isCharging) {
-        if (isCharging) {
-            triggerHaptic(context)
-            showChargingBanner = true
-            delay(3500)
-            showChargingBanner = false
-        }
-    }
+    val mode = GlobalIslandState.currentMode
+    val isExpanded = GlobalIslandState.isExpanded
+    val isPlaying = GlobalIslandState.isPlaying
+    val song = GlobalIslandState.currentSong
 
     // Pegas Fisika Animasi iOS Dynamic Island
     val springSpec = spring<Float>(
-        dampingRatio = 0.76f,
+        dampingRatio = 0.78f,
         stiffness = Spring.StiffnessMediumLow
     )
 
+    // Lebar Dynamic Island otomatis menyesuaikan mode (Sesuai Screenshot Image 1)
     val targetWidth = when {
-        isExpanded -> 362f
-        showChargingBanner -> 250f
-        currentMode == IslandMode.CALL -> 220f
-        currentMode == IslandMode.MUSIC -> if (isPlaying) 205f else 170f
-        else -> 126f  // Idle notch pill
+        isExpanded -> 364f
+        mode == IslandMode.MUSIC -> if (isPlaying) 296f else 260f
+        mode == IslandMode.NAVIGATION -> 280f
+        mode == IslandMode.TIMER -> 220f
+        mode == IslandMode.RECORDING -> 200f
+        mode == IslandMode.LIVE_ACTIVITY -> 295f
+        mode == IslandMode.FACE_ID -> 270f
+        mode == IslandMode.CHARGING -> 240f
+        mode == IslandMode.TRANSLATE -> 310f
+        mode == IslandMode.FOCUS -> 240f
+        mode == IslandMode.CALL -> if (GlobalIslandState.isIncomingCall) 290f else 210f
+        else -> 130f // Standby pill
     }
     val animatedWidth by animateFloatAsState(targetValue = targetWidth, animationSpec = springSpec, label = "islandW")
 
     val targetHeight = when {
-        isExpanded -> 188f
-        showChargingBanner -> 38f
-        else -> 36f
+        isExpanded -> 210f
+        else -> 38f
     }
     val animatedHeight by animateFloatAsState(targetValue = targetHeight, animationSpec = springSpec, label = "islandH")
 
-    val cornerRadius = if (isExpanded) 42.dp else 20.dp
+    val cornerRadius = if (isExpanded) 42.dp else 22.dp
 
     Box(
         modifier = modifier
@@ -247,7 +162,7 @@ fun DynamicIslandBar(
             .clip(RoundedCornerShape(cornerRadius))
             .background(Color.Black)
             .border(
-                0.7.dp,
+                0.8.dp,
                 Color.White.copy(alpha = if (isExpanded) 0.16f else 0.22f),
                 RoundedCornerShape(cornerRadius)
             )
@@ -256,68 +171,17 @@ fun DynamicIslandBar(
                 indication = null
             ) {
                 triggerHaptic(context)
-                onExpandedChange(!isExpanded)
+                GlobalIslandState.isExpanded = !isExpanded
             },
         contentAlignment = Alignment.Center
     ) {
         if (!isExpanded) {
-            // ==========================================
-            // MODE COMPACT (Kecil di Atas Kamera)
-            // ==========================================
-            when {
-                showChargingBanner -> {
-                    // Indikator Pengisian Baterai
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("⚡", fontSize = 13.sp)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Mengisi Daya", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Text("$batteryPct%", color = Color(0xFF30D158), fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                currentMode == IslandMode.CALL -> {
-                    // Sesuai Screenshot Handphone Tengah: 📞 0:08 (Hijau) & Waveform Suara
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            PhoneHandsetIcon(
-                                modifier = Modifier.size(15.dp),
-                                tint = Color(0xFF30D158)
-                            )
-                            Spacer(modifier = Modifier.width(7.dp))
-                            Text(
-                                text = String.format("%d:%02d", callSeconds / 60, callSeconds % 60),
-                                color = Color(0xFF30D158),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        // Kamera Cutout Spacer Tengah
-                        Spacer(modifier = Modifier.width(30.dp))
-
-                        // Waveform Multi-Warna Suara
-                        CallEqualizerWaveform(
-                            modifier = Modifier.size(28.dp, 16.dp)
-                        )
-                    }
-                }
-
-                currentMode == IslandMode.MUSIC -> {
-                    // Musik Sedang Diputar
+            // =============================================================
+            // TAMPILAN COMPACT SESUAI SCREENSHOT IMAGE 1 & 2
+            // =============================================================
+            when (mode) {
+                // 1. PUTAR MUSIK (Sweater Weather - The Neighbourhood + Waveform + Tombol Play/Stop)
+                IslandMode.MUSIC -> {
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
@@ -325,402 +189,801 @@ fun DynamicIslandBar(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Thumbnail Cover Beach Bunny Mini
-                        BeachBunnyArtwork(
+                        // Kiri: Album Art Mini
+                        AlbumArtThumbnail(
+                            song = song,
                             modifier = Modifier
-                                .size(22.dp)
+                                .size(24.dp)
                                 .clip(RoundedCornerShape(6.dp))
                         )
 
-                        // Kamera Cutout Spacer Tengah
-                        Spacer(modifier = Modifier.width(24.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
 
-                        // Equalizer Ungu/Magenta
-                        MusicEqualizerWaveform(
+                        // Tengah: Judul Lagu & Artis
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = song.title,
+                                color = Color.White,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = song.artist,
+                                color = Color(0xFF9E9EA7),
+                                fontSize = 9.5.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Kanan: Tombol Play/Stop Cepat Langsung di Dynamic Bar
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.12f))
+                                .clickable {
+                                    GlobalIslandState.togglePlayPause(context)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            PlayPauseMiniIcon(
+                                isPlaying = isPlaying,
+                                modifier = Modifier.size(11.dp),
+                                tint = Color.White
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Waveform Equalizer Suara
+                        LiveEqualizerWaveform(
                             isPlaying = isPlaying,
-                            modifier = Modifier.size(24.dp, 15.dp),
-                            barColor = Color(0xFFD177E5)
+                            modifier = Modifier.size(20.dp, 13.dp),
+                            barColor = Color(0xFF64D2FF)
                         )
                     }
                 }
 
-                else -> {
-                    // Sesuai Screenshot Handphone Atas: IDLE PILL
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+                // 2. NAVIGASI (200 m Turn right + Ikon Maps)
+                IslandMode.NAVIGATION -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Kiri: Panah Arah Biru
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TurnArrowIcon(
+                                modifier = Modifier.size(17.dp),
+                                tint = Color(0xFF0A84FF)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = GlobalIslandState.navDistance,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = GlobalIslandState.navInstruction,
+                                    color = Color(0xFF8E8E93),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        // Kanan: Ikon Pin Peta
+                        AppleMapsMiniIcon(modifier = Modifier.size(20.dp))
+                    }
+                }
+
+                // 3. TIMER & STOPWATCH (Timer 00:14 + Tombol Pause/Play Oranye)
+                IslandMode.TIMER -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Kiri: Ikon Stopwatch Oranye
+                        StopwatchMiniIcon(
+                            modifier = Modifier.size(18.dp),
+                            tint = Color(0xFFFF9F0A)
+                        )
+
+                        // Tengah: Waktu Hitung Mundur 00:14
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = "Timer",
+                                color = Color(0xFFFF9F0A),
+                                fontSize = 8.5.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = String.format("00:%02d", GlobalIslandState.timerSeconds),
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Kanan: Tombol Pause / Play Oranye yang bisa ditekan
                         Box(
                             modifier = Modifier
-                                .size(11.dp)
+                                .size(24.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF0F1424).copy(alpha = 0.6f))
+                                .background(Color(0xFFFF9F0A).copy(alpha = 0.25f))
+                                .border(1.dp, Color(0xFFFF9F0A), CircleShape)
+                                .clickable {
+                                    GlobalIslandState.toggleTimer(context)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            PlayPauseMiniIcon(
+                                isPlaying = GlobalIslandState.isTimerRunning,
+                                modifier = Modifier.size(10.dp),
+                                tint = Color(0xFFFF9F0A)
+                            )
+                        }
+                    }
+                }
+
+                // 4. REKAM VIDEO / AUDIO (🔴 00:05 + Gelombang Suara)
+                IslandMode.RECORDING -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Titik Merah Berkedip
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PulsingRedDot(modifier = Modifier.size(9.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = String.format("00:%02d", GlobalIslandState.recordingSeconds),
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Gelombang Suara Perekam
+                        LiveEqualizerWaveform(
+                            isPlaying = true,
+                            modifier = Modifier.size(24.dp, 14.dp),
+                            barColor = Color(0xFFFF453A)
+                        )
+                    }
+                }
+
+                // 5. LIVE ACTIVITIES (GoFood: Pesanan dalam proses, 12 min)
+                IslandMode.LIVE_ACTIVITY -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            GoFoodIconBadge(modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = GlobalIslandState.foodOrderTitle,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = GlobalIslandState.foodOrderStatus,
+                                    color = Color(0xFF8E8E93),
+                                    fontSize = 9.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = GlobalIslandState.foodOrderEta,
+                            color = Color(0xFF64D2FF),
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // 6. FACE ID (Face ID: Look at your iPhone)
+                IslandMode.FACE_ID -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FaceIdBracketIcon(
+                            modifier = Modifier.size(20.dp),
+                            tint = Color(0xFF0A84FF)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Face ID",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Look at your iPhone",
+                                color = Color(0xFF8E8E93),
+                                fontSize = 9.sp
+                            )
+                        }
+                    }
+                }
+
+                // 7. PENGISIAN DAYA (⚡ Charging 78%)
+                IslandMode.CHARGING -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("⚡", fontSize = 12.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Charging",
+                                color = Color.White,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "${GlobalIslandState.chargingPct}%",
+                                color = Color(0xFF30D158),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            BatteryPillIcon(
+                                pct = GlobalIslandState.chargingPct,
+                                isCharging = true,
+                                modifier = Modifier.size(22.dp, 11.dp)
+                            )
+                        }
+                    }
+                }
+
+                // 8. TERJEMAHAN LANGSUNG (Live Translate: English ↔ Indonesian)
+                IslandMode.TRANSLATE -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        LiveEqualizerWaveform(
+                            isPlaying = true,
+                            modifier = Modifier.size(18.dp, 12.dp),
+                            barColor = Color(0xFF64D2FF)
+                        )
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = "Live Translate",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "English ↔ Indonesian",
+                                color = Color(0xFF8E8E93),
+                                fontSize = 9.sp
+                            )
+                        }
+
+                        TranslateChatBubbleIcon(
+                            modifier = Modifier.size(18.dp),
+                            tint = Color(0xFF64D2FF)
+                        )
+                    }
+                }
+
+                // 9. FOCUS MODE (Focus: Do Not Disturb)
+                IslandMode.FOCUS -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CrescentMoonIcon(
+                                modifier = Modifier.size(15.dp),
+                                tint = Color(0xFFBF5AF2)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Focus",
+                                    color = Color(0xFF8E8E93),
+                                    fontSize = 8.5.sp
+                                )
+                                Text(
+                                    text = GlobalIslandState.focusName,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+
+                        Text("•••", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+                    }
+                }
+
+                // 10. CALL (Raka: Incoming call... atau 0:08)
+                IslandMode.CALL -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PhoneHandsetIcon(modifier = Modifier.size(14.dp), tint = Color(0xFF30D158))
+                            Spacer(modifier = Modifier.width(7.dp))
+                            Text(
+                                text = if (GlobalIslandState.isIncomingCall) "Raka" else String.format("%d:%02d", GlobalIslandState.callSeconds / 60, GlobalIslandState.callSeconds % 60),
+                                color = Color(0xFF30D158),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        if (GlobalIslandState.isIncomingCall) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFFF453A))
+                                        .clickable {
+                                            triggerHaptic(context)
+                                            GlobalIslandState.isIncomingCall = false
+                                            GlobalIslandState.onReturnToHomeScreen()
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("✕", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF30D158))
+                                        .clickable {
+                                            triggerHaptic(context)
+                                            GlobalIslandState.isIncomingCall = false
+                                            GlobalIslandState.callSeconds = 8
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    PhoneHandsetIcon(modifier = Modifier.size(12.dp), tint = Color.White)
+                                }
+                            }
+                        } else {
+                            CallEqualizerWaveform(modifier = Modifier.size(26.dp, 14.dp))
+                        }
+                    }
+                }
+
+                // 11. IDLE
+                else -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF0F1424).copy(alpha = 0.5f))
                         )
                     }
                 }
             }
         } else {
-            // ==========================================
-            // MODE EXPANDED (Sesuai Screenshot Bawah)
-            // ==========================================
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Notch Cutout Kamera Depan di Bagian Atas
-                Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(115.dp)
-                            .height(28.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFF0D0D11).copy(alpha = 0.5f))
-                    )
-                }
+            // =============================================================
+            // TAMPILAN EXPANDED (KARTU KONTROL LENGKAP SAAT DIKETUK)
+            // =============================================================
+            ExpandedIslandContent()
+        }
+    }
+}
 
-                // BARIS 1: Album Art + Judul Lagu & Artis + Equalizer Ungu
+// =========================================================================
+// KONTEN EXPANDED DYNAMIC ISLAND
+// =========================================================================
+@Composable
+fun ExpandedIslandContent() {
+    val context = LocalContext.current
+    val mode = GlobalIslandState.currentMode
+    val song = GlobalIslandState.currentSong
+    val isPlaying = GlobalIslandState.isPlaying
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        // Notch Cutout Spacer
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(110.dp)
+                    .height(24.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF0E0E12).copy(alpha = 0.6f))
+            )
+        }
+
+        when (mode) {
+            IslandMode.MUSIC -> {
+                // Header Lagu
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 2.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Cover Album Beach Bunny "Entropy"
-                    BeachBunnyArtwork(
+                    AlbumArtThumbnail(
+                        song = song,
                         modifier = Modifier
-                            .size(54.dp)
-                            .clip(RoundedCornerShape(13.dp))
-                            .border(0.6.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(13.dp))
-                            .clickable { SpotifyMediaState.openSpotify(context) }
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(0.6.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
                     )
 
-                    Spacer(modifier = Modifier.width(14.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
 
-                    // Title: "Entropy" | Artist: "Beach Bunny"
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { SpotifyMediaState.openSpotify(context) }
-                    ) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = trackTitle,
+                            text = song.title,
                             color = Color.White,
-                            fontSize = 17.sp,
+                            fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = trackArtist,
+                            text = "${song.artist} — ${song.album}",
                             color = Color(0xFF8E8E93),
-                            fontSize = 14.5.sp,
-                            fontWeight = FontWeight.Normal,
+                            fontSize = 13.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    // Equalizer Magenta / Lilac di Kanan
-                    MusicEqualizerWaveform(
+                    LiveEqualizerWaveform(
                         isPlaying = isPlaying,
-                        modifier = Modifier.size(30.dp, 20.dp),
-                        barColor = Color(0xFFD177E5)
+                        modifier = Modifier.size(28.dp, 18.dp),
+                        barColor = Color(0xFF64D2FF)
                     )
                 }
 
-                // BARIS 2: Timeline Scrubber (2:50 - bar putih interaktif - -0:51)
+                // Scrubber Timeline
                 IosScrubber(
-                    currentMs = SpotifyMediaState.trackPositionMs,
-                    totalMs = durationMs,
-                    onSeek = { newPos -> SpotifyMediaState.trackPositionMs = newPos }
+                    currentMs = GlobalIslandState.trackPositionMs,
+                    totalMs = song.durationMs,
+                    onSeek = { newPos -> GlobalIslandState.trackPositionMs = newPos }
                 )
 
-                // BARIS 3: Tombol Kontrol Musik (Previous <<, Play/Pause, Next >>, AirPlay)
+                // Tombol Kontrol Musik
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Previous Track (<<)
-                        IconButton(
-                            onClick = {
-                                triggerHaptic(context)
-                                SpotifyMediaState.previous(context)
-                                SpotifyMediaState.trackPositionMs = 0L
-                            },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            RewindIcon(modifier = Modifier.size(24.dp))
-                        }
-
-                        // Play / Pause (|| atau ▶)
-                        IconButton(
-                            onClick = {
-                                triggerHaptic(context)
-                                SpotifyMediaState.playPause(context)
-                            },
-                            modifier = Modifier.size(46.dp)
-                        ) {
-                            PlayPauseIcon(isPlaying = isPlaying, modifier = Modifier.size(28.dp))
-                        }
-
-                        // Next Track (>>)
-                        IconButton(
-                            onClick = {
-                                triggerHaptic(context)
-                                SpotifyMediaState.next(context)
-                                SpotifyMediaState.trackPositionMs = 0L
-                            },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            FastForwardIcon(modifier = Modifier.size(24.dp))
-                        }
-                    }
-
-                    // Ikon AirPlay di Kanan Bawah
                     IconButton(
-                        onClick = {
-                            triggerHaptic(context)
-                            showAirPlaySheet = true
-                        },
-                        modifier = Modifier.size(40.dp)
+                        onClick = { GlobalIslandState.playPrevious(context) },
+                        modifier = Modifier.size(38.dp)
                     ) {
-                        AirPlayIcon(modifier = Modifier.size(22.dp), tint = Color(0xFFEBEBF5))
+                        RewindIcon(modifier = Modifier.size(22.dp))
                     }
-                }
 
-                // BARIS 4: Pengganti Mode Demo Cepat (Bisa Menguji 3 Tampilan Screenshot Sekaligus)
+                    IconButton(
+                        onClick = { GlobalIslandState.togglePlayPause(context) },
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.15f))
+                    ) {
+                        PlayPauseIcon(isPlaying = isPlaying, modifier = Modifier.size(24.dp))
+                    }
+
+                    IconButton(
+                        onClick = { GlobalIslandState.playNext(context) },
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        FastForwardIcon(modifier = Modifier.size(22.dp))
+                    }
+
+                    AirPlayIcon(modifier = Modifier.size(20.dp), tint = Color(0xFF8E8E93))
+                }
+            }
+
+            IslandMode.NAVIGATION -> {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color.White.copy(alpha = 0.08f))
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    TurnArrowIcon(modifier = Modifier.size(36.dp), tint = Color(0xFF0A84FF))
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Dalam ${GlobalIslandState.navDistance} ${GlobalIslandState.navInstruction}",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Menuju ${GlobalIslandState.navDestination} • Estimasi 14 mnt",
+                            color = Color(0xFF8E8E93),
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = {
+                        triggerHaptic(context)
+                        GlobalIslandState.onReturnToHomeScreen()
+                        GlobalIslandState.isExpanded = false
+                    },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("Keluar Navigasi", color = Color(0xFFFF453A))
+                }
+            }
+
+            IslandMode.TIMER -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = String.format("00:%02d", GlobalIslandState.timerSeconds),
+                        color = Color.White,
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text("Hitung Mundur Sisa Waktu", color = Color(0xFFFF9F0A), fontSize = 12.sp)
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Button(
+                        onClick = { GlobalIslandState.resetTimer(context) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
+                        shape = RoundedCornerShape(20.dp)
                     ) {
-                        Text(
-                            text = "🎵 Musik",
-                            fontSize = 10.sp,
-                            color = if (currentMode == IslandMode.MUSIC) Color.White else Color(0xFF8E8E93),
-                            fontWeight = if (currentMode == IslandMode.MUSIC) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.clickable {
-                                triggerHaptic(context)
-                                onModeChange(IslandMode.MUSIC)
-                            }
-                        )
-                        Text(
-                            text = "•",
-                            fontSize = 10.sp,
-                            color = Color.White.copy(alpha = 0.3f)
-                        )
-                        Text(
-                            text = "📞 Panggilan (0:08)",
-                            fontSize = 10.sp,
-                            color = if (currentMode == IslandMode.CALL) Color(0xFF30D158) else Color(0xFF8E8E93),
-                            fontWeight = if (currentMode == IslandMode.CALL) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.clickable {
-                                triggerHaptic(context)
-                                onModeChange(IslandMode.CALL)
-                            }
-                        )
-                        Text(
-                            text = "•",
-                            fontSize = 10.sp,
-                            color = Color.White.copy(alpha = 0.3f)
-                        )
-                        Text(
-                            text = "⬛ Standby",
-                            fontSize = 10.sp,
-                            color = if (currentMode == IslandMode.IDLE) Color.White else Color(0xFF8E8E93),
-                            fontWeight = if (currentMode == IslandMode.IDLE) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.clickable {
-                                triggerHaptic(context)
-                                onModeChange(IslandMode.IDLE)
-                                onExpandedChange(false)
-                            }
-                        )
+                        Text("Reset", color = Color.White)
+                    }
+                    Button(
+                        onClick = { GlobalIslandState.toggleTimer(context) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9F0A)),
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
+                        Text(if (GlobalIslandState.isTimerRunning) "Jeda" else "Lanjutkan", color = Color.Black)
+                    }
+                }
+            }
+
+            IslandMode.LIVE_ACTIVITY -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    GoFoodIconBadge(modifier = Modifier.size(34.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("GoFood Delivery", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text(GlobalIslandState.foodOrderDesc, color = Color(0xFF8E8E93), fontSize = 12.sp)
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color.White.copy(alpha = 0.2f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(GlobalIslandState.foodProgress)
+                            .fillMaxHeight()
+                            .background(Color(0xFF30D158))
+                    )
+                }
+                Text("Estimasi Tiba: ${GlobalIslandState.foodOrderEta}", color = Color(0xFF64D2FF), fontSize = 12.sp)
+            }
+
+            else -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("Dynamic Island Aktif", color = Color.White, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("Ketuk untuk kembali ke mode musik", color = Color(0xFF8E8E93), fontSize = 12.sp)
+                    Button(
+                        onClick = {
+                            GlobalIslandState.currentMode = IslandMode.MUSIC
+                            GlobalIslandState.isPlaying = true
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0A84FF)),
+                        modifier = Modifier.padding(top = 10.dp)
+                    ) {
+                        Text("Buka Musik", color = Color.White)
                     }
                 }
             }
         }
-    }
 
-    // Modal Output Audio AirPlay
-    if (showAirPlaySheet) {
-        AirPlayOutputSheet(onDismiss = { showAirPlaySheet = false })
+        // Quick Mode Switcher (Memungkinkan pengguna langsung menguji semua 9 mode di gambar!)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.White.copy(alpha = 0.08f))
+                .padding(vertical = 4.dp, horizontal = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Mode Uji:", color = Color(0xFF8E8E93), fontSize = 9.sp)
+            listOf(
+                "🎵" to IslandMode.MUSIC,
+                "🧭" to IslandMode.NAVIGATION,
+                "⏱" to IslandMode.TIMER,
+                "🔴" to IslandMode.RECORDING,
+                "🍔" to IslandMode.LIVE_ACTIVITY,
+                "⚡" to IslandMode.CHARGING,
+                "🗣" to IslandMode.TRANSLATE,
+                "🌙" to IslandMode.FOCUS
+            ).forEach { (icon, targetMode) ->
+                Text(
+                    text = icon,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (mode == targetMode) Color.White.copy(alpha = 0.25f) else Color.Transparent)
+                        .clickable {
+                            triggerHaptic(context)
+                            GlobalIslandState.currentMode = targetMode
+                        }
+                        .padding(4.dp)
+                )
+            }
+        }
     }
 }
 
-// ==========================================
-// ARTWORK BEACH BUNNY "ENTROPY" (PERSIS DARI FOTO)
-// ==========================================
+// =========================================================================
+// GRAFIKA & IKON KUSTOM CANVAS (IMAGE 1 & IMAGE 2)
+// =========================================================================
+
+// Thumbnail Album Art Menggunakan Canvas Indah
 @Composable
-fun BeachBunnyArtwork(
+fun AlbumArtThumbnail(
+    song: SongItem,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
 
-        // 1. Background Galaksi Kosmik Ungu/Biru Tua
+        // Background Gradien Kosmik
         drawRect(
-            brush = Brush.radialGradient(
+            brush = Brush.linearGradient(
                 colors = listOf(
-                    Color(0xFF2C1A4D),
-                    Color(0xFF140F2E),
-                    Color(0xFF080918)
+                    Color(song.albumColorHex),
+                    Color(0xFF0C101A)
                 ),
-                center = Offset(w * 0.5f, h * 0.4f),
-                radius = w * 0.9f
+                start = Offset(0f, 0f),
+                end = Offset(w, h)
             )
         )
 
-        // 2. Bintang & Kilauan Cahaya di Angkasa
-        val stars = listOf(
-            Offset(w * 0.15f, h * 0.20f) to 1.4.dp.toPx(),
-            Offset(w * 0.85f, h * 0.22f) to 1.8.dp.toPx(),
-            Offset(w * 0.22f, h * 0.72f) to 1.0.dp.toPx(),
-            Offset(w * 0.80f, h * 0.68f) to 1.4.dp.toPx(),
-            Offset(w * 0.50f, h * 0.10f) to 1.5.dp.toPx(),
-            Offset(w * 0.10f, h * 0.45f) to 1.0.dp.toPx(),
-            Offset(w * 0.90f, h * 0.42f) to 1.2.dp.toPx()
-        )
-        stars.forEach { (pos, r) ->
-            drawCircle(Color(0xFFE2D6FF).copy(alpha = 0.85f), radius = r, center = pos)
-        }
-
-        // Bintang 4-Sisi Kilau Cantik
-        val starX = w * 0.80f
-        val starY = h * 0.16f
-        val starS = w * 0.07f
-        val starPath = Path().apply {
-            moveTo(starX, starY - starS)
-            quadraticBezierTo(starX, starY, starX + starS, starY)
-            quadraticBezierTo(starX, starY, starX, starY + starS)
-            quadraticBezierTo(starX, starY, starX - starS, starY)
-            quadraticBezierTo(starX, starY, starX, starY - starS)
-            close()
-        }
-        drawPath(starPath, color = Color.White.copy(alpha = 0.9f))
-
-        // 3. Badan & Baju Gadis
-        val torsoPath = Path().apply {
-            moveTo(w * 0.12f, h)
-            cubicTo(w * 0.18f, h * 0.74f, w * 0.38f, h * 0.70f, w * 0.50f, h * 0.70f)
-            cubicTo(w * 0.62f, h * 0.70f, w * 0.82f, h * 0.74f, w * 0.88f, h)
-            close()
-        }
-        drawPath(torsoPath, color = Color(0xFF382362))
-
-        // Leher
-        drawRect(
-            color = Color(0xFFFFD5C2),
-            topLeft = Offset(w * 0.42f, h * 0.54f),
-            size = Size(w * 0.16f, h * 0.20f)
-        )
-
-        // 4. Rambut Pirang Bob (Blonde Hair)
+        // Bintang / Pola Artistik
         drawCircle(
-            color = Color(0xFFFCD36A),
-            radius = w * 0.33f,
-            center = Offset(w * 0.50f, h * 0.44f)
+            color = Color(0xFF64D2FF).copy(alpha = 0.4f),
+            radius = w * 0.35f,
+            center = Offset(w * 0.3f, h * 0.35f)
+        )
+        drawCircle(
+            color = Color(0xFFD177E5).copy(alpha = 0.35f),
+            radius = w * 0.4f,
+            center = Offset(w * 0.75f, h * 0.7f)
         )
 
-        // 5. Wajah Cantik Oval
-        drawOval(
-            color = Color(0xFFFFDFC4),
-            topLeft = Offset(w * 0.27f, h * 0.24f),
-            size = Size(w * 0.46f, h * 0.44f)
+        // Ikon Not Balok Elegan di Tengah
+        val noteColor = Color.White.copy(alpha = 0.9f)
+        drawCircle(noteColor, radius = w * 0.12f, center = Offset(w * 0.4f, h * 0.65f))
+        drawCircle(noteColor, radius = w * 0.12f, center = Offset(w * 0.65f, h * 0.55f))
+        drawLine(
+            color = noteColor,
+            start = Offset(w * 0.5f, h * 0.65f),
+            end = Offset(w * 0.5f, h * 0.25f),
+            strokeWidth = 1.6.dp.toPx()
         )
-
-        // Blush Pipi Merah Muda Lembut
-        drawCircle(Color(0xFFFF7E98).copy(alpha = 0.32f), radius = w * 0.065f, center = Offset(w * 0.35f, h * 0.51f))
-        drawCircle(Color(0xFFFF7E98).copy(alpha = 0.32f), radius = w * 0.065f, center = Offset(w * 0.65f, h * 0.51f))
-
-        // Mata Berbinar
-        drawOval(Color(0xFF2B2240), topLeft = Offset(w * 0.35f, h * 0.42f), size = Size(w * 0.065f, h * 0.085f))
-        drawOval(Color(0xFF2B2240), topLeft = Offset(w * 0.585f, h * 0.42f), size = Size(w * 0.065f, h * 0.085f))
-        drawCircle(Color.White, radius = 1.3.dp.toPx(), center = Offset(w * 0.365f, h * 0.435f))
-        drawCircle(Color.White, radius = 1.3.dp.toPx(), center = Offset(w * 0.600f, h * 0.435f))
-
-        // Bibir Senyum Tipis
-        val lips = Path().apply {
-            moveTo(w * 0.45f, h * 0.57f)
-            quadraticBezierTo(w * 0.50f, h * 0.60f, w * 0.55f, h * 0.57f)
-        }
-        drawPath(lips, color = Color(0xFFDE6D74), style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round))
-
-        // 6. Poni Pirang Lurus Rapi
-        val bangs = Path().apply {
-            moveTo(w * 0.24f, h * 0.33f)
-            cubicTo(w * 0.30f, h * 0.17f, w * 0.70f, h * 0.17f, w * 0.76f, h * 0.33f)
-            lineTo(w * 0.74f, h * 0.37f)
-            cubicTo(w * 0.60f, h * 0.35f, w * 0.40f, h * 0.35f, w * 0.26f, h * 0.37f)
-            close()
-        }
-        drawPath(bangs, color = Color(0xFFFFE082))
-
-        // 7. Sarung Tangan Lilac / Ungu Menopang Dagu (Pose Beach Bunny)
-        val leftGlove = Path().apply {
-            moveTo(w * 0.18f, h * 0.88f)
-            lineTo(w * 0.33f, h * 0.54f)
-            cubicTo(w * 0.37f, h * 0.49f, w * 0.43f, h * 0.51f, w * 0.45f, h * 0.61f)
-            lineTo(w * 0.37f, h * 0.88f)
-            close()
-        }
-        drawPath(leftGlove, color = Color(0xFFB388FF))
-
-        val rightGlove = Path().apply {
-            moveTo(w * 0.82f, h * 0.88f)
-            lineTo(w * 0.67f, h * 0.54f)
-            cubicTo(w * 0.63f, h * 0.49f, w * 0.57f, h * 0.51f, w * 0.55f, h * 0.61f)
-            lineTo(w * 0.63f, h * 0.88f)
-            close()
-        }
-        drawPath(rightGlove, color = Color(0xFF9E6DE8))
-
-        drawCircle(Color(0xFFD3B8FF), radius = 2.2.dp.toPx(), center = Offset(w * 0.38f, h * 0.57f))
-        drawCircle(Color(0xFFD3B8FF), radius = 2.2.dp.toPx(), center = Offset(w * 0.62f, h * 0.57f))
+        drawLine(
+            color = noteColor,
+            start = Offset(w * 0.75f, h * 0.55f),
+            end = Offset(w * 0.75f, h * 0.20f),
+            strokeWidth = 1.6.dp.toPx()
+        )
+        drawLine(
+            color = noteColor,
+            start = Offset(w * 0.5f, h * 0.25f),
+            end = Offset(w * 0.75f, h * 0.20f),
+            strokeWidth = 2.4.dp.toPx()
+        )
     }
 }
 
-// ==========================================
-// EQUALIZER UNGU/MAGENTA (MUSIK AKTIF)
-// ==========================================
+// Gelombang Equalizer Animasi Real-Time
 @Composable
-fun MusicEqualizerWaveform(
+fun LiveEqualizerWaveform(
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
-    barColor: Color = Color(0xFFD177E5)
+    barColor: Color = Color(0xFF64D2FF)
 ) {
     if (!isPlaying) {
         Canvas(modifier = modifier) {
-            val barW = 3.dp.toPx()
-            val spacing = 2.5.dp.toPx()
-            val staticHeights = listOf(0.35f, 0.70f, 0.45f, 0.85f, 0.40f)
-            staticHeights.forEachIndexed { i, r ->
+            val barW = 2.6.dp.toPx()
+            val spacing = 2.2.dp.toPx()
+            val staticRatios = listOf(0.35f, 0.65f, 0.40f, 0.75f)
+            staticRatios.forEachIndexed { i, r ->
                 val x = i * (barW + spacing)
                 val h = size.height * r
                 val y = (size.height - h) / 2
                 drawRoundRect(
-                    color = barColor.copy(alpha = 0.5f),
+                    color = barColor.copy(alpha = 0.4f),
                     topLeft = Offset(x, y),
                     size = Size(barW, h),
                     cornerRadius = CornerRadius(barW / 2, barW / 2)
@@ -730,17 +993,16 @@ fun MusicEqualizerWaveform(
         return
     }
 
-    val transition = rememberInfiniteTransition(label = "musicEq")
+    val transition = rememberInfiniteTransition(label = "eqAnim")
     val b1 by transition.animateFloat(0.20f, 0.95f, infiniteRepeatable(tween(260, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "1")
-    val b2 by transition.animateFloat(0.90f, 0.30f, infiniteRepeatable(tween(340, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "2")
+    val b2 by transition.animateFloat(0.90f, 0.25f, infiniteRepeatable(tween(340, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "2")
     val b3 by transition.animateFloat(0.35f, 1.00f, infiniteRepeatable(tween(280, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "3")
-    val b4 by transition.animateFloat(0.85f, 0.25f, infiniteRepeatable(tween(360, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "4")
-    val b5 by transition.animateFloat(0.40f, 0.90f, infiniteRepeatable(tween(310, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "5")
+    val b4 by transition.animateFloat(0.85f, 0.20f, infiniteRepeatable(tween(360, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "4")
 
     Canvas(modifier = modifier) {
-        val barW = 3.dp.toPx()
-        val spacing = 2.5.dp.toPx()
-        val bars = listOf(b1, b2, b3, b4, b5)
+        val barW = 2.6.dp.toPx()
+        val spacing = 2.2.dp.toPx()
+        val bars = listOf(b1, b2, b3, b4)
         bars.forEachIndexed { i, factor ->
             val x = i * (barW + spacing)
             val h = size.height * factor
@@ -755,253 +1017,9 @@ fun MusicEqualizerWaveform(
     }
 }
 
-// ==========================================
-// EQUALIZER MULTI-WARNA PANGGILAN AKTIF
-// ==========================================
+// Ikon Mini Play/Pause untuk Dynamic Bar
 @Composable
-fun CallEqualizerWaveform(
-    modifier: Modifier = Modifier
-) {
-    val transition = rememberInfiniteTransition(label = "callEq")
-    val c1 by transition.animateFloat(0.35f, 0.95f, infiniteRepeatable(tween(250, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "c1")
-    val c2 by transition.animateFloat(0.85f, 0.30f, infiniteRepeatable(tween(330, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "c2")
-    val c3 by transition.animateFloat(0.40f, 1.00f, infiniteRepeatable(tween(280, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "c3")
-    val c4 by transition.animateFloat(0.95f, 0.20f, infiniteRepeatable(tween(350, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "c4")
-    val c5 by transition.animateFloat(0.50f, 0.90f, infiniteRepeatable(tween(300, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "c5")
-    val c6 by transition.animateFloat(0.80f, 0.35f, infiniteRepeatable(tween(320, easing = LinearOutSlowInEasing), RepeatMode.Reverse), label = "c6")
-
-    val barColors = listOf(
-        Color(0xFF30D158),
-        Color(0xFF30D158),
-        Color(0xFFFFD60A),
-        Color(0xFFFFD60A),
-        Color(0xFFFF9F0A),
-        Color(0xFFFF9F0A)
-    )
-
-    Canvas(modifier = modifier) {
-        val barW = 2.5.dp.toPx()
-        val spacing = 2.dp.toPx()
-        val bars = listOf(c1, c2, c3, c4, c5, c6)
-        bars.forEachIndexed { i, factor ->
-            val x = i * (barW + spacing)
-            val h = size.height * factor
-            val y = (size.height - h) / 2
-            drawRoundRect(
-                color = barColors[i % barColors.size],
-                topLeft = Offset(x, y),
-                size = Size(barW, h),
-                cornerRadius = CornerRadius(barW / 2, barW / 2)
-            )
-        }
-    }
-}
-
-// ==========================================
-// SCRUBBER & TIMELINE ALA iOS (2:50 - bar - -0:51)
-// ==========================================
-@Composable
-fun IosScrubber(
-    currentMs: Long,
-    totalMs: Long,
-    onSeek: (Long) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val progress = (currentMs.toFloat() / totalMs.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
-    var isDragging by remember { mutableStateOf(false) }
-    var dragProgress by remember { mutableFloatStateOf(0f) }
-
-    val activeRatio = if (isDragging) dragProgress else progress
-    val effectiveMs = if (isDragging) (dragProgress * totalMs).toLong() else currentMs
-    val currentSec = (effectiveMs / 1000L).coerceAtLeast(0L)
-    val remainingSec = ((totalMs - effectiveMs) / 1000L).coerceAtLeast(0L)
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(18.dp)
-                .pointerInput(totalMs) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        isDragging = true
-                        dragProgress = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull() ?: break
-                            if (change.pressed) {
-                                dragProgress = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                change.consume()
-                            } else {
-                                isDragging = false
-                                onSeek((dragProgress * totalMs).toLong())
-                                break
-                            }
-                        }
-                    }
-                },
-            contentAlignment = Alignment.CenterStart
-        ) {
-            // Background Track Abu-Abu iOS
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(3.5.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0xFF38383A))
-            )
-
-            // Active Track Putih Penuh
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(activeRatio)
-                    .height(3.5.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color.White)
-            )
-
-            // Scrubber Thumb Bulat Putih
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(activeRatio)
-                    .wrapContentWidth(Alignment.End)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(if (isDragging) 9.dp else 5.dp)
-                        .clip(CircleShape)
-                        .background(Color.White)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(1.dp))
-
-        // Label Menit & Detik: "2:50" di Kiri, "-0:51" di Kanan
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = String.format("%d:%02d", currentSec / 60, currentSec % 60),
-                color = Color(0xFF8E8E93),
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                text = String.format("-%d:%02d", remainingSec / 60, remainingSec % 60),
-                color = Color(0xFF8E8E93),
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
-
-// ==========================================
-// IKON-IKON VEKTOR CANVAS iOS RESMI
-// ==========================================
-
-// Ikon AirPlay Apple Resmi
-@Composable
-fun AirPlayIcon(
-    modifier: Modifier = Modifier,
-    tint: Color = Color.White
-) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-
-        // Segitiga di Bawah
-        val triangle = Path().apply {
-            moveTo(w * 0.50f, h * 0.56f)
-            lineTo(w * 0.72f, h * 0.88f)
-            lineTo(w * 0.28f, h * 0.88f)
-            close()
-        }
-        drawPath(triangle, color = tint)
-
-        val strokeW = 1.8.dp.toPx()
-        // Lengkungan Busur Dalam
-        drawArc(
-            color = tint,
-            startAngle = 210f,
-            sweepAngle = 120f,
-            useCenter = false,
-            topLeft = Offset(w * 0.24f, h * 0.24f),
-            size = Size(w * 0.52f, h * 0.52f),
-            style = Stroke(width = strokeW, cap = StrokeCap.Round)
-        )
-
-        // Lengkungan Busur Luar
-        drawArc(
-            color = tint,
-            startAngle = 215f,
-            sweepAngle = 110f,
-            useCenter = false,
-            topLeft = Offset(w * 0.08f, h * 0.08f),
-            size = Size(w * 0.84f, h * 0.84f),
-            style = Stroke(width = strokeW, cap = StrokeCap.Round)
-        )
-    }
-}
-
-// Ikon Rewind (<<)
-@Composable
-fun RewindIcon(
-    modifier: Modifier = Modifier,
-    tint: Color = Color.White
-) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val p1 = Path().apply {
-            moveTo(w * 0.46f, h * 0.20f)
-            lineTo(w * 0.06f, h * 0.50f)
-            lineTo(w * 0.46f, h * 0.80f)
-            close()
-        }
-        val p2 = Path().apply {
-            moveTo(w * 0.94f, h * 0.20f)
-            lineTo(w * 0.54f, h * 0.50f)
-            lineTo(w * 0.94f, h * 0.80f)
-            close()
-        }
-        drawPath(p1, color = tint)
-        drawPath(p2, color = tint)
-    }
-}
-
-// Ikon Fast Forward (>>)
-@Composable
-fun FastForwardIcon(
-    modifier: Modifier = Modifier,
-    tint: Color = Color.White
-) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val p1 = Path().apply {
-            moveTo(w * 0.06f, h * 0.20f)
-            lineTo(w * 0.46f, h * 0.50f)
-            lineTo(w * 0.06f, h * 0.80f)
-            close()
-        }
-        val p2 = Path().apply {
-            moveTo(w * 0.54f, h * 0.20f)
-            lineTo(w * 0.94f, h * 0.50f)
-            lineTo(w * 0.54f, h * 0.80f)
-            close()
-        }
-        drawPath(p1, color = tint)
-        drawPath(p2, color = tint)
-    }
-}
-
-// Ikon Play / Pause (|| atau ▶)
-@Composable
-fun PlayPauseIcon(
+fun PlayPauseMiniIcon(
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
     tint: Color = Color.White
@@ -1010,30 +1028,18 @@ fun PlayPauseIcon(
         val w = size.width
         val h = size.height
         if (isPlaying) {
-            // Dua Batang Pause Tegak
-            val barW = 4.2.dp.toPx()
-            val barH = h * 0.72f
-            val gap = 6.dp.toPx()
+            val barW = 2.8.dp.toPx()
+            val barH = h * 0.85f
+            val gap = 3.dp.toPx()
             val startX = (w - (2 * barW + gap)) / 2
             val startY = (h - barH) / 2
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset(startX, startY),
-                size = Size(barW, barH),
-                cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
-            )
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset(startX + barW + gap, startY),
-                size = Size(barW, barH),
-                cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
-            )
+            drawRoundRect(tint, Offset(startX, startY), Size(barW, barH), CornerRadius(1.dp.toPx(), 1.dp.toPx()))
+            drawRoundRect(tint, Offset(startX + barW + gap, startY), Size(barW, barH), CornerRadius(1.dp.toPx(), 1.dp.toPx()))
         } else {
-            // Segitiga Play
             val path = Path().apply {
-                moveTo(w * 0.28f, h * 0.18f)
-                lineTo(w * 0.82f, h * 0.50f)
-                lineTo(w * 0.28f, h * 0.82f)
+                moveTo(w * 0.25f, h * 0.15f)
+                lineTo(w * 0.85f, h * 0.50f)
+                lineTo(w * 0.25f, h * 0.85f)
                 close()
             }
             drawPath(path, color = tint)
@@ -1041,189 +1047,235 @@ fun PlayPauseIcon(
     }
 }
 
-// Ikon Telepon Hijau Handset
+// Panah Belok Navigasi (Image 1: 200 m Turn right)
 @Composable
-fun PhoneHandsetIcon(
+fun TurnArrowIcon(
     modifier: Modifier = Modifier,
-    tint: Color = Color(0xFF30D158)
+    tint: Color = Color(0xFF0A84FF)
 ) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
-        val path = Path().apply {
-            moveTo(w * 0.22f, h * 0.35f)
-            cubicTo(w * 0.22f, h * 0.25f, w * 0.35f, h * 0.15f, w * 0.45f, h * 0.22f)
-            lineTo(w * 0.52f, h * 0.38f)
-            cubicTo(w * 0.55f, h * 0.44f, w * 0.50f, h * 0.50f, w * 0.44f, h * 0.54f)
-            cubicTo(w * 0.50f, h * 0.65f, w * 0.60f, h * 0.75f, w * 0.70f, h * 0.80f)
-            cubicTo(w * 0.74f, h * 0.74f, w * 0.80f, h * 0.70f, w * 0.86f, h * 0.72f)
-            lineTo(w * 0.98f, h * 0.82f)
-            cubicTo(w * 1.05f, h * 0.90f, w * 0.95f, h * 1.05f, w * 0.85f, h * 1.05f)
-            cubicTo(w * 0.50f, h * 1.05f, w * 0.15f, h * 0.70f, w * 0.15f, h * 0.42f)
+        val stroke = 3.dp.toPx()
+
+        val stem = Path().apply {
+            moveTo(w * 0.35f, h * 0.85f)
+            lineTo(w * 0.35f, h * 0.45f)
+            quadraticBezierTo(w * 0.35f, h * 0.25f, w * 0.58f, h * 0.25f)
+            lineTo(w * 0.75f, h * 0.25f)
+        }
+        drawPath(stem, color = tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+
+        val arrowHead = Path().apply {
+            moveTo(w * 0.65f, h * 0.12f)
+            lineTo(w * 0.85f, h * 0.25f)
+            lineTo(w * 0.65f, h * 0.38f)
             close()
         }
-        drawPath(path, color = tint)
+        drawPath(arrowHead, color = tint)
     }
 }
 
-// Ikon Sinyal Seluler 4 Bar Tangga
+// Ikon Mini Apple Maps
 @Composable
-fun CellularSignalIcon(modifier: Modifier = Modifier) {
+fun AppleMapsMiniIcon(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
-        val barW = 2.4.dp.toPx()
-        val spacing = 1.8.dp.toPx()
-        val ratios = listOf(0.35f, 0.58f, 0.80f, 1.0f)
-        ratios.forEachIndexed { i, r ->
-            val barH = h * r
-            val x = i * (barW + spacing)
-            val y = h - barH
-            drawRoundRect(
-                color = Color.White,
-                topLeft = Offset(x, y),
-                size = Size(barW, barH),
-                cornerRadius = CornerRadius(0.8.dp.toPx(), 0.8.dp.toPx())
-            )
+
+        drawRoundRect(
+            brush = Brush.linearGradient(listOf(Color(0xFF34C759), Color(0xFF007AFF))),
+            size = Size(w, h),
+            cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx())
+        )
+
+        // Jalan raya putih & pin merah
+        val road = Path().apply {
+            moveTo(w * 0.2f, h)
+            lineTo(w * 0.8f, 0f)
         }
+        drawPath(road, color = Color.White.copy(alpha = 0.85f), style = Stroke(width = 2.dp.toPx()))
+
+        drawCircle(Color(0xFFFF3B30), radius = 3.dp.toPx(), center = Offset(w * 0.5f, h * 0.5f))
     }
 }
 
-// Ikon Wi-Fi 3 Busur Konsentris
+// Ikon Mini Stopwatch (Image 1: Timer 00:14)
 @Composable
-fun WifiIcon(modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val stroke = 1.5.dp.toPx()
-
-        drawArc(
-            color = Color.White,
-            startAngle = 225f,
-            sweepAngle = 90f,
-            useCenter = false,
-            topLeft = Offset(w * 0.05f, h * 0.05f),
-            size = Size(w * 0.90f, h * 0.90f),
-            style = Stroke(width = stroke, cap = StrokeCap.Round)
-        )
-        drawArc(
-            color = Color.White,
-            startAngle = 225f,
-            sweepAngle = 90f,
-            useCenter = false,
-            topLeft = Offset(w * 0.25f, h * 0.35f),
-            size = Size(w * 0.50f, h * 0.50f),
-            style = Stroke(width = stroke, cap = StrokeCap.Round)
-        )
-        drawCircle(
-            color = Color.White,
-            radius = 1.4.dp.toPx(),
-            center = Offset(w * 0.50f, h * 0.88f)
-        )
-    }
-}
-
-// Ikon Baterai Kapsul iOS
-@Composable
-fun BatteryPillIcon(
-    pct: Int,
-    isCharging: Boolean,
-    modifier: Modifier = Modifier
+fun StopwatchMiniIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = Color(0xFFFF9F0A)
 ) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
-        val bodyW = w - 2.5.dp.toPx()
+        val stroke = 1.8.dp.toPx()
 
-        // Kerangka luar baterai
-        drawRoundRect(
-            color = Color.White.copy(alpha = 0.40f),
-            topLeft = Offset(0f, 0f),
-            size = Size(bodyW, h),
-            cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
-            style = Stroke(width = 1.2.dp.toPx())
+        drawCircle(
+            color = tint,
+            radius = w * 0.38f,
+            center = Offset(w * 0.5f, h * 0.55f),
+            style = Stroke(width = stroke)
         )
 
-        // Terminal kutub positif baterai di kanan
-        val nubW = 1.8.dp.toPx()
-        val nubH = h * 0.40f
-        drawRoundRect(
-            color = Color.White.copy(alpha = 0.40f),
-            topLeft = Offset(bodyW + 0.8.dp.toPx(), (h - nubH) / 2),
-            size = Size(nubW, nubH),
-            cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx())
+        // Tombol atas stopwatch
+        drawLine(
+            color = tint,
+            start = Offset(w * 0.5f, h * 0.17f),
+            end = Offset(w * 0.5f, h * 0.05f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
         )
 
-        // Isi Baterai (Fill)
-        val fillPadding = 2.dp.toPx()
-        val maxFillW = bodyW - (fillPadding * 2)
-        val fillW = (maxFillW * (pct.coerceIn(5, 100) / 100f)).coerceAtLeast(2.dp.toPx())
-        val fillColor = when {
-            isCharging -> Color(0xFF30D158)
-            pct <= 20 -> Color(0xFFFF453A)
-            else -> Color.White
-        }
-
-        drawRoundRect(
-            color = fillColor,
-            topLeft = Offset(fillPadding, fillPadding),
-            size = Size(fillW, h - (fillPadding * 2)),
-            cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
+        // Jarum jam di dalam
+        drawLine(
+            color = tint,
+            start = Offset(w * 0.5f, h * 0.55f),
+            end = Offset(w * 0.68f, h * 0.42f),
+            strokeWidth = stroke * 0.9f,
+            cap = StrokeCap.Round
         )
     }
 }
 
-// ==========================================
-// MODAL AIRPLAY OUTPUT SELECTOR
-// ==========================================
+// Titik Merah Berkedip untuk Mode Rekam Video/Audio
 @Composable
-fun AirPlayOutputSheet(onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    var selectedDevice by remember { mutableStateOf("iPhone Speaker") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1C1C1E).copy(alpha = 0.96f),
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                AirPlayIcon(modifier = Modifier.size(20.dp), tint = Color.White)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Output Audio", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-            }
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf(
-                    "iPhone Speaker (Bawaan)",
-                    "AirPods Pro (Spatial Audio)",
-                    "Perangkat Bluetooth Lain"
-                ).forEach { device ->
-                    val isSelected = selectedDevice.startsWith(device.take(6))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) Color.White.copy(alpha = 0.15f) else Color.Transparent)
-                            .clickable {
-                                triggerHaptic(context)
-                                selectedDevice = device
-                            }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(device, color = Color.White, fontSize = 14.sp)
-                        if (isSelected) {
-                            Text("✓", color = Color(0xFF0A84FF), fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Selesai", color = Color(0xFF0A84FF), fontWeight = FontWeight.SemiBold)
-            }
-        }
+fun PulsingRedDot(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(tween(500, easing = LinearEasing), RepeatMode.Reverse),
+        label = "dotAlpha"
     )
+
+    Canvas(modifier = modifier) {
+        drawCircle(Color(0xFFFF453A).copy(alpha = alpha), radius = size.minDimension / 2)
+    }
+}
+
+// Badge GoFood (Image 1: GoFood Pesanan dalam proses)
+@Composable
+fun GoFoodIconBadge(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+
+        drawCircle(Color(0xFFEE2737), radius = w / 2)
+
+        // Garpu & Sendok Putih
+        val stroke = 1.6.dp.toPx()
+        // Garpu
+        drawLine(Color.White, Offset(w * 0.38f, h * 0.3f), Offset(w * 0.38f, h * 0.72f), strokeWidth = stroke, cap = StrokeCap.Round)
+        drawLine(Color.White, Offset(w * 0.32f, h * 0.3f), Offset(w * 0.44f, h * 0.3f), strokeWidth = stroke, cap = StrokeCap.Round)
+
+        // Sendok
+        drawOval(Color.White, topLeft = Offset(w * 0.56f, h * 0.26f), size = Size(w * 0.18f, h * 0.22f))
+        drawLine(Color.White, Offset(w * 0.65f, h * 0.46f), Offset(w * 0.65f, h * 0.72f), strokeWidth = stroke, cap = StrokeCap.Round)
+    }
+}
+
+// Ikon Face ID (Image 1: Face ID Look at your iPhone)
+@Composable
+fun FaceIdBracketIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = Color(0xFF0A84FF)
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = 1.8.dp.toPx()
+        val corner = 4.dp.toPx()
+
+        // 4 Sudut Bracket
+        // Kiri Atas
+        val tl = Path().apply {
+            moveTo(0f, corner * 2)
+            lineTo(0f, corner)
+            quadraticBezierTo(0f, 0f, corner, 0f)
+            lineTo(corner * 2, 0f)
+        }
+        drawPath(tl, color = tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+
+        // Kanan Atas
+        val tr = Path().apply {
+            moveTo(w - corner * 2, 0f)
+            lineTo(w - corner, 0f)
+            quadraticBezierTo(w, 0f, w, corner)
+            lineTo(w, corner * 2)
+        }
+        drawPath(tr, color = tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+
+        // Kiri Bawah
+        val bl = Path().apply {
+            moveTo(0f, h - corner * 2)
+            lineTo(0f, h - corner)
+            quadraticBezierTo(0f, h, corner, h)
+            lineTo(corner * 2, h)
+        }
+        drawPath(bl, color = tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+
+        // Kanan Bawah
+        val br = Path().apply {
+            moveTo(w - corner * 2, h)
+            lineTo(w - corner, h)
+            quadraticBezierTo(w, h, w, h - corner)
+            lineTo(w, h - corner * 2)
+        }
+        drawPath(br, color = tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+
+        // Mata & Senyum di Dalam
+        drawCircle(tint, radius = 1.2.dp.toPx(), center = Offset(w * 0.36f, h * 0.42f))
+        drawCircle(tint, radius = 1.2.dp.toPx(), center = Offset(w * 0.64f, h * 0.42f))
+
+        val smile = Path().apply {
+            moveTo(w * 0.35f, h * 0.64f)
+            quadraticBezierTo(w * 0.50f, h * 0.74f, w * 0.65f, h * 0.64f)
+        }
+        drawPath(smile, color = tint, style = Stroke(width = stroke * 0.9f, cap = StrokeCap.Round))
+    }
+}
+
+// Ikon Gelembung Terjemahan (Image 1: Live Translate)
+@Composable
+fun TranslateChatBubbleIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = Color(0xFF64D2FF)
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(0f, 0f),
+            size = Size(w * 0.85f, h * 0.75f),
+            cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
+            style = Stroke(width = 1.5.dp.toPx())
+        )
+
+        // Garis panah terjemahan
+        drawLine(tint, Offset(w * 0.2f, h * 0.37f), Offset(w * 0.65f, h * 0.37f), strokeWidth = 1.2.dp.toPx())
+    }
+}
+
+// Ikon Bulan Sabit Focus Mode (Image 1: Focus Do Not Disturb)
+@Composable
+fun CrescentMoonIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = Color(0xFFBF5AF2)
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+
+        val moonPath = Path().apply {
+            moveTo(w * 0.5f, 0f)
+            cubicTo(w * 0.2f, 0f, 0f, h * 0.25f, 0f, h * 0.55f)
+            cubicTo(0f, h * 0.85f, w * 0.25f, h, w * 0.65f, h)
+            cubicTo(w * 0.35f, h * 0.85f, w * 0.35f, h * 0.25f, w * 0.5f, 0f)
+            close()
+        }
+        drawPath(moonPath, color = tint)
+    }
 }
